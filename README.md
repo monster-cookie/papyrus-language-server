@@ -34,3 +34,10 @@ cargo run --package papyrus-language-server
 ```
 
 Protocol output is reserved for LSP messages. Operational errors are written to standard error.
+
+## Project documentation
+
+- [Changelog](CHANGELOG.md)
+- [Known issues and deferred work](KNOWN-ISSUES.md)
+- [Testing and validation evidence](docs/TESTING.md)
+- [Roadmap](docs/ROADMAP.md)
