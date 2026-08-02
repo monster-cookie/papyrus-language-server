@@ -1,0 +1,19 @@
+[package]
+name = "papyrus-language-server"
+description = "Editor-neutral language server for Bethesda Papyrus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lsp-server.workspace = true
+lsp-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tree-sitter.workspace = true
+tree-sitter-papyrus = { path = "../../grammar" }
+
+[lints]
+workspace = true
