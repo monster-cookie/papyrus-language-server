@@ -19,6 +19,24 @@ Rust tests verify:
 - a full-text change that inserts the missing closer clears the diagnostic;
 - initialize, initialized, shutdown, and exit complete successfully over an in-memory LSP connection.
 
+## Downstream Zed acceptance
+
+Results recorded on Windows x64 on 2026-08-02 using a locally built release executable configured in Zed:
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Valid Starfield fixtures | Pass | The Basic and Advanced fixtures opened with no diagnostics. |
+| Valid Skyrim fixtures | Pass | The Basic and Advanced fixtures opened with no diagnostics. |
+| Valid Fallout 4 fixtures | Pass | The Basic and Advanced fixtures opened with no diagnostics. |
+| Missing Starfield closer | Pass | The invalid fixture reported `Missing EndIf before EndFunction` at `EndFunction`. |
+| Missing Skyrim closer | Pass | The invalid fixture reported `Missing EndState`. |
+| Missing Fallout 4 closer | Pass | The invalid fixture reported `Missing EndStruct`. |
+| Unsaved-buffer updates | Pass | Inserting `EndIf` cleared the diagnostic immediately, and undoing the insertion restored it. |
+| Zed presentation | Pass | The editor underline, hover message, and diagnostics view displayed the diagnostic. |
+| Process restart | Pass | Zed relaunched the configured server and diagnostics remained functional after restart. |
+
+This validates the local executable path and protocol behavior through a real editor client. Automatic download and launch from the first published release remain a separate downstream acceptance check.
+
 ## Local commands
 
 ```powershell
