@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Added `auto`, Skyrim, Fallout 4, and Starfield workspace configuration.
+- Added recursive project-source and import-directory indexing.
+- Added hierarchical document symbols and case-insensitive workspace symbol search.
+- Added unsaved-buffer symbol overlays with disk restoration on close.
+
 ## Version 0.1.0 (August 2nd, 2026)
 
 - Added an original Tree-sitter grammar covering the Papyrus dialects used by Skyrim Anniversary Edition, Fallout 4, and Starfield.

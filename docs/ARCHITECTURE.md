@@ -30,7 +30,13 @@ produces `Missing EndIf before EndFunction` at `EndFunction`.
 
 ### LSP transport
 
-The server uses a synchronous stdio message loop. It advertises UTF-16 positions and full-text synchronization, stores only open documents in memory, and publishes diagnostics for open, changed, and saved buffers. Closing a document clears its diagnostics.
+The server uses a synchronous stdio message loop. It advertises UTF-16 positions and full-text synchronization and publishes diagnostics for open, changed, and saved buffers. Closing a document clears its diagnostics.
+
+### Workspace and symbols
+
+Initialization options select `auto`, `skyrim`, `fallout4`, or `starfield` and may provide project source roots and import directories. File-based LSP workspace folders become source roots when explicit roots are absent. `auto` is currently a safe unspecified value rather than dialect inference.
+
+The server recursively indexes `.psc` files under those roots in memory. Open documents overlay their disk-backed entries so symbol requests reflect unsaved text; closing a document restores its disk version. Tree-sitter declaration nodes produce hierarchical document symbols and a flattened, case-insensitive workspace-symbol view. Duplicate names remain in the index for later semantic resolution.
 
 Standard output is reserved for protocol traffic. Fatal operational errors are written to standard error.
 
@@ -51,4 +57,4 @@ The Node packages are development-only. Exact resolved Rust and Node versions ar
 
 ## Deferred layers
 
-Workspace indexing, symbol resolution, completion, navigation, compiler discovery, automatic compilation, and debugging are intentionally outside the diagnostic-first milestone. Compiler integration must remain optional and must never redistribute Bethesda tools or source.
+Symbol resolution, completion, navigation, semantic checking, compiler discovery, automatic compilation, and debugging remain deferred. Compiler integration must remain optional and must never redistribute Bethesda tools or source.

@@ -2,7 +2,7 @@
 
 An editor-neutral language server and canonical Tree-sitter grammar for Bethesda's Papyrus scripting language.
 
-The project targets the Papyrus dialects used by Skyrim Anniversary Edition, Fallout 4, and Starfield. Its first milestone provides native, unsaved-buffer syntax diagnostics with human-readable structural errors such as a missing `EndIf`.
+The project targets the Papyrus dialects used by Skyrim Anniversary Edition, Fallout 4, and Starfield. It provides native syntax diagnostics, document symbols, and an in-memory workspace symbol index.
 
 No Bethesda compiler, flags file, or game source is distributed by this repository. The committed fixtures are original synthetic examples.
 
@@ -34,6 +34,22 @@ cargo run --package papyrus-language-server
 ```
 
 Protocol output is reserved for LSP messages. Operational errors are written to standard error.
+
+## Workspace configuration
+
+Editors may supply settings through `initializationOptions.papyrus`:
+
+```json
+{
+  "papyrus": {
+    "dialect": "auto",
+    "sourceRoots": ["C:\\Projects\\MyMod\\Scripts\\Source"],
+    "importDirectories": ["C:\\Games\\Example\\Data\\Scripts\\Source"]
+  }
+}
+```
+
+`dialect` accepts `auto`, `skyrim`, `fallout4`, or `starfield` and defaults to `auto`. When `sourceRoots` is omitted, the server indexes the file-based LSP workspace folders. Import directories are indexed alongside project roots. The current milestone records the dialect for later semantic work; `auto` does not yet infer a dialect.
 
 ## Project documentation
 

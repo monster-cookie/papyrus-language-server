@@ -9,15 +9,20 @@
 - Native release archives for Windows, Linux, and macOS.
 - Zed extension download and launch integration.
 
-## 0.2: Workspace model
+## 0.2: Workspace foundation
 
 - Game and dialect selection with a safe `auto` mode.
 - Configured import directories and project source roots.
 - Workspace symbol index.
+- Document and workspace symbol providers.
+
+## 0.3: Semantic navigation
+
 - Go to definition, references, hover, and signature help.
+- Rename and semantic diagnostics.
 - Project-aware completion.
 
-## 0.3: Optional compiler integration
+## 0.4: Optional compiler integration
 
 - Explicit compiler, flags, import, and output settings.
 - Windows registry and Steam-library discovery in the native server.

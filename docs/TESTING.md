@@ -17,6 +17,9 @@ Rust tests verify:
 - UTF-8 byte offsets convert to UTF-16 LSP positions;
 - diagnostics are published for an unsaved open buffer;
 - a full-text change that inserts the missing closer clears the diagnostic;
+- recursive workspace indexing accepts case-insensitive `.psc` extensions;
+- document and workspace symbols reflect unsaved text;
+- closing an overlaid document restores its disk-backed symbols;
 - initialize, initialized, shutdown, and exit complete successfully over an in-memory LSP connection.
 
 ## Downstream Zed acceptance

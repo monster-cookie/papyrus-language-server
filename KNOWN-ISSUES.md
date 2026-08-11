@@ -1,13 +1,13 @@
 # Known issues and deferred work
 
-## Diagnostic-first milestone
+## Workspace-foundation milestone
 
-Version 0.1 provides syntax and structural diagnostics for open buffers. It does not yet provide:
+The server provides syntax diagnostics and syntactic document/workspace symbols. It does not yet provide:
 
 - completion or signature help;
 - hover information;
-- go to definition, references, rename, or workspace symbols;
-- workspace indexing or project-aware import resolution;
+- go to definition, references, or rename;
+- semantic symbol resolution or project-aware import resolution;
 - semantic type checking;
 - compiler discovery or automatic compilation;
 - formatting;
@@ -21,7 +21,7 @@ For a missing closing keyword, the server reports the conflicting closer or the 
 
 ## Workspace scope
 
-Version 0.1 analyzes the current text supplied by an editor. It does not scan neighboring scripts, resolve imports, or infer a game dialect from a project layout.
+The index scans configured source roots and import directories and overlays open buffers. Indexing is synchronous and in-memory, and `auto` does not yet infer a game dialect. The server does not yet resolve imports or types across files.
 
 ## Prebuilt platforms
 
