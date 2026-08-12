@@ -108,7 +108,7 @@ fn serves_document_and_workspace_symbols_from_unsaved_text() {
             params: json!({
                 "capabilities": {},
                 "initializationOptions": {
-                    "papyrus": { "dialect": "starfield" }
+                    "papyrus": { "dialect": "auto" }
                 }
             }),
         }))

@@ -18,9 +18,10 @@
 
 ## 0.3: Semantic navigation
 
-- Go to definition, references, hover, and signature help.
+- Source-derived completion, hover, and go to definition.
+- Starfield Creation Kit source discovery and local navigable cache.
+- References and signature help.
 - Rename and semantic diagnostics.
-- Project-aware completion.
 
 ## 0.4: Optional compiler integration
 

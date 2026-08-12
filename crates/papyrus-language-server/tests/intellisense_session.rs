@@ -1,0 +1,159 @@
+use std::{
+    fs, thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use lsp_server::{Connection, Message, Notification, Request, RequestId};
+use serde_json::{Value, json};
+
+#[test]
+fn advertises_and_serves_source_derived_intellisense() {
+    let root = std::env::temp_dir().join(format!(
+        "papyrus-intellisense-session-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("Actor.psc"),
+        "ScriptName Actor\n{Source evidence}\nFunction Jump()\nEndFunction\n",
+    )
+    .unwrap();
+    let project = root.join("Project.psc");
+    fs::write(
+        &project,
+        "ScriptName Project\nActor Target\nFunction Test()\n  Target.Jump()\nEndFunction\n",
+    )
+    .unwrap();
+
+    let (server, client) = Connection::memory();
+    let server_thread = thread::spawn(move || papyrus_language_server::run_connection(&server));
+    send_request(
+        &client,
+        1,
+        "initialize",
+        json!({
+            "capabilities": {},
+            "initializationOptions": { "papyrus": {
+                "dialect": "auto",
+                "sourceRoots": [root.to_string_lossy()]
+            }}
+        }),
+    );
+    let capabilities = receive_response(&client);
+    assert_eq!(
+        capabilities["capabilities"]["completionProvider"]["triggerCharacters"][0],
+        "."
+    );
+    assert_eq!(capabilities["capabilities"]["hoverProvider"], true);
+    assert_eq!(capabilities["capabilities"]["definitionProvider"], true);
+    client
+        .sender
+        .send(Message::Notification(Notification::new(
+            "initialized".to_owned(),
+            json!({}),
+        )))
+        .unwrap();
+
+    let uri = path_uri(&project);
+    client.sender.send(Message::Notification(Notification::new("textDocument/didOpen".to_owned(), json!({
+        "textDocument": { "uri": uri, "languageId": "papyrus", "version": 1,
+            "text": "ScriptName Project\nActor Target\nFunction Test()\n  Target.Jump()\nEndFunction\n" }
+    })))).unwrap();
+    receive_notification(&client, "textDocument/publishDiagnostics");
+
+    send_request(
+        &client,
+        2,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri }, "position": { "line": 3, "character": 9 }
+        }),
+    );
+    let completion = receive_response(&client);
+    assert!(
+        completion
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "Jump")
+    );
+
+    send_request(
+        &client,
+        3,
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": uri }, "position": { "line": 3, "character": 11 }
+        }),
+    );
+    let hover = receive_response(&client);
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("Jump")
+    );
+
+    send_request(
+        &client,
+        4,
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": uri }, "position": { "line": 3, "character": 11 }
+        }),
+    );
+    let definition = receive_response(&client);
+    assert!(definition["uri"].as_str().unwrap().ends_with("Actor.psc"));
+
+    send_request(&client, 5, "shutdown", json!(null));
+    receive_response(&client);
+    client
+        .sender
+        .send(Message::Notification(Notification::new(
+            "exit".to_owned(),
+            json!(null),
+        )))
+        .unwrap();
+    server_thread.join().unwrap().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn send_request(connection: &Connection, id: i32, method: &str, params: Value) {
+    connection
+        .sender
+        .send(Message::Request(Request {
+            id: RequestId::from(id),
+            method: method.to_owned(),
+            params,
+        }))
+        .unwrap();
+}
+
+fn receive_response(connection: &Connection) -> Value {
+    let Message::Response(response) = connection
+        .receiver
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+    else {
+        panic!("expected response");
+    };
+    response.response_result.unwrap()
+}
+
+fn receive_notification(connection: &Connection, method: &str) {
+    let Message::Notification(notification) = connection
+        .receiver
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+    else {
+        panic!("expected notification");
+    };
+    assert_eq!(notification.method, method);
+}
+
+fn path_uri(path: &std::path::Path) -> String {
+    format!("file:///{}", path.to_string_lossy().replace('\\', "/"))
+}

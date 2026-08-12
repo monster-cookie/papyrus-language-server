@@ -2,13 +2,18 @@ use std::error::Error;
 
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, InitializeParams,
-    PublishDiagnosticsParams, Uri, WorkspaceSymbolParams,
+    CompletionParams, CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentSymbolParams,
+    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, HoverParams,
+    InitializeParams, PublishDiagnosticsParams, Uri, WorkspaceSymbolParams,
 };
 
 use crate::{
-    config::WorkspaceConfig, diagnostics::PapyrusAnalyzer, documents::DocumentStore,
+    cache::materialize_starfield_sources,
+    config::{PapyrusDialect, WorkspaceConfig},
+    diagnostics::PapyrusAnalyzer,
+    discovery::discover_starfield_archive,
+    documents::DocumentStore,
     workspace::WorkspaceIndex,
 };
 
@@ -26,12 +31,36 @@ pub fn run_connection(connection: &Connection) -> ServerResult<()> {
     let (initialize_id, initialize_value) = connection.initialize_start()?;
     let initialize_params: InitializeParams = serde_json::from_value(initialize_value)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let config = WorkspaceConfig::from_initialize(&initialize_params);
+    let mut config = WorkspaceConfig::from_initialize(&initialize_params);
+    if config.dialect == PapyrusDialect::Starfield {
+        if let Some(archive) = discover_starfield_archive() {
+            match materialize_starfield_sources(&archive) {
+                Ok(cache) => {
+                    eprintln!(
+                        "papyrus-language-server: SFCK cache {} (indexed {}, excluded {})",
+                        cache.root.display(),
+                        cache.indexed,
+                        cache.excluded
+                    );
+                    config.add_discovered_import(cache.root);
+                }
+                Err(error) => eprintln!(
+                    "papyrus-language-server: failed to materialize {}: {error}",
+                    archive.display()
+                ),
+            }
+        } else {
+            eprintln!("papyrus-language-server: Starfield Creation Kit source archive not found");
+        }
+    }
     let initialize_result = serde_json::json!({
         "capabilities": {
             "positionEncoding": "utf-16",
             "documentSymbolProvider": true,
             "workspaceSymbolProvider": true,
+            "completionProvider": { "triggerCharacters": ["."] },
+            "hoverProvider": true,
+            "definitionProvider": true,
             "textDocumentSync": {
                 "openClose": true,
                 "change": 1,
@@ -99,6 +128,37 @@ impl Server {
                     deserialize_request(request.params, "workspaceSymbol")?;
                 let symbols = self.workspace.workspace_symbols(&params.query);
                 Response::new_ok(request.id, serde_json::to_value(symbols)?)
+            }
+            "textDocument/completion" => {
+                let params: CompletionParams = deserialize_request(request.params, "completion")?;
+                let items = self.workspace.completion(
+                    &params.text_document_position.text_document.uri,
+                    params.text_document_position.position,
+                );
+                Response::new_ok(
+                    request.id,
+                    serde_json::to_value(CompletionResponse::Array(items))?,
+                )
+            }
+            "textDocument/hover" => {
+                let params: HoverParams = deserialize_request(request.params, "hover")?;
+                let result = self.workspace.hover(
+                    &params.text_document_position_params.text_document.uri,
+                    params.text_document_position_params.position,
+                );
+                Response::new_ok(request.id, serde_json::to_value(result)?)
+            }
+            "textDocument/definition" => {
+                let params: GotoDefinitionParams =
+                    deserialize_request(request.params, "definition")?;
+                let result = self
+                    .workspace
+                    .definition(
+                        &params.text_document_position_params.text_document.uri,
+                        params.text_document_position_params.position,
+                    )
+                    .map(GotoDefinitionResponse::Scalar);
+                Response::new_ok(request.id, serde_json::to_value(result)?)
             }
             _ => Response::new_err(
                 request.id,

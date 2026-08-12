@@ -2,12 +2,10 @@
 
 ## Workspace-foundation milestone
 
-The server provides syntax diagnostics and syntactic document/workspace symbols. It does not yet provide:
+The server provides syntax diagnostics, semantic completion, hover, definition, and document/workspace symbols. It does not yet provide:
 
-- completion or signature help;
-- hover information;
-- go to definition, references, or rename;
-- semantic symbol resolution or project-aware import resolution;
+- references, rename, or signature help;
+- full expression type inference;
 - semantic type checking;
 - compiler discovery or automatic compilation;
 - formatting;
@@ -21,7 +19,9 @@ For a missing closing keyword, the server reports the conflicting closer or the 
 
 ## Workspace scope
 
-The index scans configured source roots and import directories and overlays open buffers. Indexing is synchronous and in-memory, and `auto` does not yet infer a game dialect. The server does not yet resolve imports or types across files.
+The index scans configured source roots and import directories and overlays open buffers. Indexing is synchronous and in-memory, and `auto` does not infer a game dialect. Starfield SDK discovery requires an installed Steam Creation Kit and an explicit `starfield` dialect. Unsupported or ambiguous expressions intentionally produce no IntelliSense result.
+
+Old fingerprinted SDK cache generations are not automatically removed yet.
 
 ## Prebuilt platforms
 

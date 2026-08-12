@@ -21,6 +21,8 @@ pub struct WorkspaceConfig {
     pub dialect: PapyrusDialect,
     pub source_roots: Vec<PathBuf>,
     pub import_directories: Vec<PathBuf>,
+    #[serde(skip)]
+    pub(crate) discovered_import_directories: Vec<PathBuf>,
 }
 
 #[derive(Default, Deserialize)]
@@ -54,7 +56,16 @@ impl WorkspaceConfig {
     }
 
     pub(crate) fn roots(&self) -> impl Iterator<Item = &PathBuf> {
-        self.source_roots.iter().chain(&self.import_directories)
+        self.source_roots
+            .iter()
+            .chain(&self.import_directories)
+            .chain(&self.discovered_import_directories)
+    }
+
+    pub(crate) fn add_discovered_import(&mut self, path: PathBuf) {
+        if !self.roots().any(|existing| existing == &path) {
+            self.discovered_import_directories.push(path);
+        }
     }
 }
 

@@ -14,6 +14,10 @@ serde.workspace = true
 serde_json.workspace = true
 tree-sitter.workspace = true
 tree-sitter-papyrus = { path = "../../grammar" }
+zip.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg.workspace = true
 
 [lints]
 workspace = true

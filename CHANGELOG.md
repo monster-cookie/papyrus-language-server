@@ -6,6 +6,10 @@
 - Added recursive project-source and import-directory indexing.
 - Added hierarchical document symbols and case-insensitive workspace symbol search.
 - Added unsaved-buffer symbol overlays with disk restoration on close.
+- Added source-derived, inheritance-aware completion, hover, and go to definition.
+- Added Windows Steam discovery for Starfield Creation Kit source archives.
+- Added a fingerprinted local cache of navigable SFCK sources with generated-fragment filtering.
+- Added conservative ambiguity handling that returns no semantic claim instead of guessing.
 
 ## Version 0.1.0 (August 2nd, 2026)
 

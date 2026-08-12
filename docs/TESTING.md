@@ -20,6 +20,10 @@ Rust tests verify:
 - recursive workspace indexing accepts case-insensitive `.psc` extensions;
 - document and workspace symbols reflect unsaved text;
 - closing an overlaid document restores its disk-backed symbols;
+- inheritance-aware member completion excludes unresolved and ambiguous receivers;
+- hover and go to definition resolve the same source-derived declaration;
+- Steam manifest discovery and ZIP cache extraction use synthetic temporary fixtures;
+- generated fragment filters retain reusable quest and perk base scripts;
 - initialize, initialized, shutdown, and exit complete successfully over an in-memory LSP connection.
 
 ## Downstream Zed acceptance
