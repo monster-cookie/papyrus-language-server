@@ -10,6 +10,7 @@ repository = "https://github.com/monster-cookie/papyrus-language-server"
 rust-version = "1.85"
 
 [workspace.dependencies]
+blake3 = "1.8"
 cc = "1.2"
 lsp-server = "0.10.0"
 lsp-types = "0.97.0"

@@ -1,11 +1,12 @@
 use std::ops::Range as ByteRange;
 
-use lsp_types::{Range, Uri};
+use lsp_types::{DocumentSymbol, Range, Uri};
+use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Parser};
 
 use crate::line_index::LineIndex;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct TypeRef {
     pub(crate) name: String,
     pub(crate) array: bool,
@@ -17,13 +18,13 @@ impl TypeRef {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Parameter {
     pub(crate) name: String,
     pub(crate) ty: TypeRef,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) enum DeclarationKind {
     Script,
     Property,
@@ -36,7 +37,7 @@ pub(crate) enum DeclarationKind {
     Guard,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Declaration {
     pub(crate) name: String,
     pub(crate) kind: DeclarationKind,
@@ -47,6 +48,8 @@ pub(crate) struct Declaration {
     pub(crate) selection_range: Range,
     pub(crate) scope: ByteRange<usize>,
     pub(crate) documentation: Option<String>,
+    pub(crate) is_const: bool,
+    pub(crate) is_global: bool,
 }
 
 impl Declaration {
@@ -76,13 +79,17 @@ impl Declaration {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SemanticDocument {
     pub(crate) uri: Uri,
+    #[serde(skip)]
     pub(crate) text: String,
     pub(crate) script_name: Option<String>,
     pub(crate) parent_script: Option<String>,
+    pub(crate) imports: Vec<String>,
     pub(crate) declarations: Vec<Declaration>,
+    #[serde(skip)]
+    pub(crate) symbols: Vec<DocumentSymbol>,
 }
 
 pub(crate) struct SemanticExtractor {
@@ -104,18 +111,25 @@ impl SemanticExtractor {
             text: source.to_owned(),
             script_name: None,
             parent_script: None,
+            imports: Vec::new(),
             declarations: Vec::new(),
+            symbols: Vec::new(),
         };
         let Some(tree) = self.parser.parse(source, None) else {
             return document;
         };
         let line_index = LineIndex::new(source);
         let root = tree.root_node();
+        document.symbols = crate::symbols::extract_from_tree(root, source, &line_index);
         let mut cursor = root.walk();
         for child in root.named_children(&mut cursor) {
             if child.kind() == "script_declaration" {
                 document.script_name = field_text(child, "name", source);
                 document.parent_script = field_text(child, "parent", source);
+            } else if child.kind() == "import_declaration"
+                && let Some(module) = field_text(child, "module", source)
+            {
+                document.imports.push(module);
             }
         }
         let script = document.script_name.clone();
@@ -244,7 +258,15 @@ fn declaration(
         selection_range: index.range(source, name_node.byte_range()),
         scope,
         documentation: preceding_documentation(node, source),
+        is_const: has_named_child(node, "const"),
+        is_global: has_named_child(node, "global"),
     })
+}
+
+fn has_named_child(node: Node<'_>, kind: &str) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|child| child.kind().eq_ignore_ascii_case(kind))
 }
 
 fn type_ref(node: Node<'_>, source: &str) -> Option<TypeRef> {
@@ -319,6 +341,32 @@ mod tests {
                 .iter()
                 .any(|item| item.name == "LocalActor"
                     && item.container.as_deref() == Some("Resolve"))
+        );
+    }
+
+    #[test]
+    fn extracts_imports_and_semantic_modifiers() {
+        let source = concat!(
+            "ScriptName Example\n",
+            "Import Venworks:Core:Logging\n",
+            "Int CONST_Value = 1 Const\n",
+            "Function LogSystem() Global\nEndFunction\n",
+        );
+        let document = SemanticExtractor::new()
+            .unwrap()
+            .extract(Uri::from_str("file:///Example.psc").unwrap(), source);
+        assert_eq!(document.imports, ["Venworks:Core:Logging"]);
+        assert!(
+            document
+                .declarations
+                .iter()
+                .any(|item| item.name == "CONST_Value" && item.is_const)
+        );
+        assert!(
+            document
+                .declarations
+                .iter()
+                .any(|item| item.name == "LogSystem" && item.is_global)
         );
     }
 }

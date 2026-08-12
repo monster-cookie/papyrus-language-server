@@ -1,30 +1,7 @@
 use lsp_types::{DocumentSymbol, Range, SymbolKind};
-use tree_sitter::{Node, Parser};
+use tree_sitter::Node;
 
 use crate::line_index::LineIndex;
-
-/// Extracts the declaration hierarchy advertised through LSP symbol requests.
-pub(crate) struct SymbolExtractor {
-    parser: Parser,
-}
-
-impl SymbolExtractor {
-    pub(crate) fn new() -> Result<Self, String> {
-        let mut parser = Parser::new();
-        parser
-            .set_language(&tree_sitter_papyrus::LANGUAGE.into())
-            .map_err(|error| format!("failed to load the Papyrus grammar: {error}"))?;
-        Ok(Self { parser })
-    }
-
-    pub(crate) fn extract(&mut self, source: &str) -> Vec<DocumentSymbol> {
-        let Some(tree) = self.parser.parse(source, None) else {
-            return Vec::new();
-        };
-        let index = LineIndex::new(source);
-        declaration_children(tree.root_node(), source, &index)
-    }
-}
 
 fn declaration_children(node: Node<'_>, source: &str, index: &LineIndex) -> Vec<DocumentSymbol> {
     let mut symbols = Vec::new();
@@ -41,6 +18,14 @@ fn declaration_children(node: Node<'_>, source: &str, index: &LineIndex) -> Vec<
         }
     }
     symbols
+}
+
+pub(crate) fn extract_from_tree(
+    root: Node<'_>,
+    source: &str,
+    index: &LineIndex,
+) -> Vec<DocumentSymbol> {
+    declaration_children(root, source, index)
 }
 
 #[allow(deprecated)]
@@ -80,8 +65,11 @@ fn node_range(node: Node<'_>, source: &str, index: &LineIndex) -> Range {
 #[cfg(test)]
 mod tests {
     use lsp_types::SymbolKind;
+    use tree_sitter::Parser;
 
-    use super::SymbolExtractor;
+    use crate::line_index::LineIndex;
+
+    use super::extract_from_tree;
 
     #[test]
     fn extracts_nested_declarations_and_utf16_ranges() {
@@ -92,7 +80,12 @@ mod tests {
             "  String Local = \"😀\"\n",
             "EndFunction\n",
         );
-        let symbols = SymbolExtractor::new().unwrap().extract(source);
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_papyrus::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let symbols = extract_from_tree(tree.root_node(), source, &LineIndex::new(source));
         assert_eq!(symbols[0].name, "Example");
         assert_eq!(symbols[0].kind, SymbolKind::CLASS);
         assert!(symbols.iter().any(|symbol| symbol.name == "Count"));

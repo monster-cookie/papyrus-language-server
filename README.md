@@ -55,6 +55,16 @@ When `dialect` is `starfield`, the server also discovers Steam's Starfield Creat
 
 IntelliSense is deliberately conservative. Member completion is returned only when the receiver's declared type resolves uniquely, including inherited members. Hover and definition use the same indexed declaration and never synthesize missing types, APIs, or documentation.
 
+Imported scripts contribute their declared structs and `Global` functions to completion, hover, and go to definition. Top-level `Const` values and `Global` functions are excluded from instance-member completion.
+
+## Semantic index cache
+
+The server fingerprints normalized source text with BLAKE3. Scripts with the same case-insensitive script name and content fingerprint share one semantic identity even when projects contain identical `Papyrus` and `Staging` copies. A same-name script with different contents remains ambiguous; the server does not silently choose one implementation.
+
+Parsed declarations are persisted in `%LOCALAPPDATA%\papyrus-language-server\cache\semantic-index-v3.json`; source text itself is not duplicated in the cache. Unchanged files are restored by path, size, modification time, cache schema, and content fingerprint. Editing a file rebuilds that entry, while changing the semantic schema invalidates the cache automatically. The cache contains no authoritative project data and can be deleted safely to force a complete rebuild.
+
+Startup logs report indexed files, cache hits and misses, identical aliases, and elapsed indexing time. Language-server requests taking at least 250 ms are also reported to standard error.
+
 ## Project documentation
 
 - [Changelog](CHANGELOG.md)

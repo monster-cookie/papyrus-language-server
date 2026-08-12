@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{error::Error, time::Instant};
 
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::{
@@ -113,6 +113,8 @@ impl Server {
     }
 
     fn handle_request(&mut self, connection: &Connection, request: Request) -> ServerResult<()> {
+        let started = Instant::now();
+        let method = request.method.clone();
         let response = match request.method.as_str() {
             "textDocument/documentSymbol" => {
                 let params: DocumentSymbolParams =
@@ -167,6 +169,12 @@ impl Server {
             ),
         };
         connection.sender.send(Message::Response(response))?;
+        if started.elapsed().as_millis() >= 250 {
+            eprintln!(
+                "papyrus-language-server: slow {method} request: {} ms",
+                started.elapsed().as_millis()
+            );
+        }
         Ok(())
     }
 

@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+blake3.workspace = true
 lsp-server.workspace = true
 lsp-types.workspace = true
 serde.workspace = true
