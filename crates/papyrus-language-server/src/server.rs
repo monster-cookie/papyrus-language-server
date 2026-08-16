@@ -5,7 +5,8 @@ use lsp_types::{
     CompletionParams, CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentSymbolParams,
     DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, HoverParams,
-    InitializeParams, PublishDiagnosticsParams, ReferenceParams, Uri, WorkspaceSymbolParams,
+    InitializeParams, PublishDiagnosticsParams, ReferenceParams, SignatureHelpParams, Uri,
+    WorkspaceSymbolParams,
 };
 
 use crate::{
@@ -70,6 +71,10 @@ pub fn run_connection(connection: &Connection) -> ServerResult<()> {
             "hoverProvider": true,
             "definitionProvider": true,
             "referencesProvider": true,
+            "signatureHelpProvider": {
+                "triggerCharacters": ["("],
+                "retriggerCharacters": [","]
+            },
             "textDocumentSync": {
                 "openClose": true,
                 "change": 1,
@@ -177,6 +182,15 @@ impl Server {
                     &params.text_document_position.text_document.uri,
                     params.text_document_position.position,
                     params.context.include_declaration,
+                );
+                Response::new_ok(request.id, serde_json::to_value(result)?)
+            }
+            "textDocument/signatureHelp" => {
+                let params: SignatureHelpParams =
+                    deserialize_request(request.params, "signatureHelp")?;
+                let result = self.workspace.signature_help(
+                    &params.text_document_position_params.text_document.uri,
+                    params.text_document_position_params.position,
                 );
                 Response::new_ok(request.id, serde_json::to_value(result)?)
             }

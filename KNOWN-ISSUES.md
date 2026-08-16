@@ -2,9 +2,9 @@
 
 ## Semantic-navigation milestone
 
-The server provides syntax diagnostics, semantic completion, hover, definition, references, and document/workspace symbols. It does not yet provide:
+The server provides syntax diagnostics, semantic completion, hover, definition, references, signature help, and document/workspace symbols. It does not yet provide:
 
-- rename or signature help;
+- rename;
 - full expression type inference;
 - semantic type checking;
 - compiler discovery or automatic compilation;

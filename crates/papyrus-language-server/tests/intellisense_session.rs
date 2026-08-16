@@ -18,13 +18,13 @@ fn advertises_and_serves_source_derived_intellisense() {
     fs::create_dir_all(&root).unwrap();
     fs::write(
         root.join("Actor.psc"),
-        "ScriptName Actor\n{Source evidence}\nFunction Jump()\nEndFunction\n",
+        "ScriptName Actor\n{Source evidence}\nFunction Jump(Int Height, String Label)\nEndFunction\n",
     )
     .unwrap();
     let project = root.join("Project.psc");
     fs::write(
         &project,
-        "ScriptName Project\nActor Target\nFunction Test()\n  Target.Jump()\nEndFunction\n",
+        "ScriptName Project\nActor Target\nFunction Test()\n  Target.Jump(1, \"test\")\nEndFunction\n",
     )
     .unwrap();
 
@@ -50,6 +50,14 @@ fn advertises_and_serves_source_derived_intellisense() {
     assert_eq!(capabilities["capabilities"]["hoverProvider"], true);
     assert_eq!(capabilities["capabilities"]["definitionProvider"], true);
     assert_eq!(capabilities["capabilities"]["referencesProvider"], true);
+    assert_eq!(
+        capabilities["capabilities"]["signatureHelpProvider"]["triggerCharacters"][0],
+        "("
+    );
+    assert_eq!(
+        capabilities["capabilities"]["signatureHelpProvider"]["retriggerCharacters"][0],
+        ","
+    );
     client
         .sender
         .send(Message::Notification(Notification::new(
@@ -61,7 +69,7 @@ fn advertises_and_serves_source_derived_intellisense() {
     let uri = path_uri(&project);
     client.sender.send(Message::Notification(Notification::new("textDocument/didOpen".to_owned(), json!({
         "textDocument": { "uri": uri, "languageId": "papyrus", "version": 1,
-            "text": "ScriptName Project\nActor Target\nFunction Test()\n  Target.Jump()\nEndFunction\n" }
+            "text": "ScriptName Project\nActor Target\nFunction Test()\n  Target.Jump(1, \"test\")\nEndFunction\n" }
     })))).unwrap();
     receive_notification(&client, "textDocument/publishDiagnostics");
 
@@ -132,7 +140,27 @@ fn advertises_and_serves_source_derived_intellisense() {
             && location["range"]["start"]["line"] == 3
     }));
 
-    send_request(&client, 6, "shutdown", json!(null));
+    send_request(
+        &client,
+        6,
+        "textDocument/signatureHelp",
+        json!({
+            "textDocument": { "uri": uri }, "position": { "line": 3, "character": 17 }
+        }),
+    );
+    let signature_help = receive_response(&client);
+    assert_eq!(
+        signature_help["signatures"][0]["label"],
+        "Jump(Int Height, String Label)"
+    );
+    assert_eq!(signature_help["activeSignature"], 0);
+    assert_eq!(signature_help["activeParameter"], 1);
+    assert_eq!(
+        signature_help["signatures"][0]["documentation"],
+        "Source evidence"
+    );
+
+    send_request(&client, 7, "shutdown", json!(null));
     receive_response(&client);
     client
         .sender

@@ -38,9 +38,9 @@ Initialization options select `auto`, `skyrim`, `fallout4`, or `starfield` and m
 
 The server recursively indexes `.psc` files under those roots in memory. Open documents overlay their disk-backed entries so symbol requests reflect unsaved text; closing a document restores its disk version. Tree-sitter declaration nodes produce hierarchical document symbols and a flattened, case-insensitive workspace-symbol view. Duplicate names remain in the index for later semantic resolution.
 
-The semantic index retains declared types, signatures, scopes, inheritance, source documentation, locations, and syntax-backed identifier occurrences. Project sources have precedence over configured imports, which have precedence over discovered SDK sources. Duplicate candidates at the same precedence are ambiguous and deliberately do not produce hover, definition, reference, or member-completion claims.
+The semantic index retains declared types, signatures, scopes, inheritance, source documentation, locations, syntax-backed identifier occurrences, and transient call sites for open buffers. Project sources have precedence over configured imports, which have precedence over discovered SDK sources. Duplicate candidates at the same precedence are ambiguous and deliberately do not produce hover, definition, reference, signature-help, or member-completion claims.
 
-Workspace indexing and completion remain in `workspace.rs`; shared declaration resolution, hover, definition, and references are isolated in `workspace/navigation.rs`. Find References uses a case-insensitive occurrence lookup to narrow candidates, then resolves each candidate to the selected declaration. It never treats textual matches in comments or strings as references. Results honor lexical scopes and imports, use the canonical navigation copy for identical aliases, and are sorted and deduplicated by URI and range.
+Workspace indexing and completion remain in `workspace.rs`; shared declaration resolution, hover, definition, references, and signature help are isolated in `workspace/navigation.rs`. Find References uses a case-insensitive occurrence lookup to narrow candidates, then resolves each candidate to the selected declaration. It never treats textual matches in comments or strings as references. Results honor lexical scopes and imports, use the canonical navigation copy for identical aliases, and are sorted and deduplicated by URI and range. Signature help selects the innermost syntax-backed call at the cursor, maps positional or named arguments to the uniquely resolved declaration, and does not persist call-site metadata in the semantic cache.
 
 Semantic cache schema v4 persists declarations and identifier occurrence metadata so references work on cache hits without retaining source text. Older cache generations are ignored rather than migrated or deleted.
 
@@ -70,4 +70,4 @@ The Node packages are development-only. Exact resolved Rust and Node versions ar
 
 ## Deferred layers
 
-Rename, signature help, broader expression inference, semantic checking, compiler discovery, automatic compilation, and debugging remain deferred. Compiler integration must remain optional and must never redistribute Bethesda tools or source.
+Rename, broader expression inference, semantic checking, compiler discovery, automatic compilation, and debugging remain deferred. Compiler integration must remain optional and must never redistribute Bethesda tools or source.

@@ -24,6 +24,8 @@ Rust tests verify:
 - instance completion excludes `Const` and conventional `CONST_` members while retaining ordinary `AutoReadOnly` properties;
 - explicitly written constant-style members still resolve for hover and go to definition;
 - hover and go to definition resolve the same source-derived declaration;
+- signature help maps positional and named arguments to inherited, imported-global, and script-qualified declarations;
+- nested and incomplete calls select the correct signature and active parameter without guessing ambiguous callees;
 - script-qualified global calls resolve their script and global function while preserving variable shadowing and project-source precedence;
 - find references honors declaration inclusion, local scopes, parameters, inherited members, imported globals and structs, and conservative ambiguity handling;
 - reference extraction excludes declaration names, named-argument labels, comments, and strings;
@@ -32,7 +34,7 @@ Rust tests verify:
 - Windows extended-length drive and UNC paths normalize before conversion to LSP file URIs;
 - Steam manifest discovery, installed-source preference, ZIP cache fallback, and discovered-source filtering use synthetic temporary fixtures;
 - generated fragment filters retain reusable quest and perk base scripts;
-- initialize advertises references, and completion, hover, definition, references, initialized, shutdown, and exit complete successfully over an in-memory LSP connection.
+- initialize advertises completion, hover, definition, references, and signature help; those requests plus initialized, shutdown, and exit complete successfully over an in-memory LSP connection.
 
 ## Downstream Zed acceptance
 

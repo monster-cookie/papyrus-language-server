@@ -1,6 +1,9 @@
 use std::{cmp::Ordering, collections::HashSet};
 
-use lsp_types::{Hover, HoverContents, Location, MarkupContent, MarkupKind, Position, Range, Uri};
+use lsp_types::{
+    Documentation, Hover, HoverContents, Location, MarkupContent, MarkupKind, ParameterInformation,
+    ParameterLabel, Position, Range, SignatureHelp, SignatureInformation, Uri,
+};
 
 use crate::{
     line_index::LineIndex,
@@ -84,6 +87,60 @@ impl WorkspaceIndex {
         locations.sort_by(compare_locations);
         locations.dedup_by(|left, right| left.uri == right.uri && left.range == right.range);
         locations
+    }
+
+    pub(crate) fn signature_help(&self, uri: &Uri, position: Position) -> Option<SignatureHelp> {
+        let current = self.documents.get(uri)?;
+        let text = &current.semantic.text;
+        if text.is_empty() {
+            return None;
+        }
+        let offset = LineIndex::new(text).byte_offset(text, position);
+        let call = current
+            .semantic
+            .call_sites
+            .iter()
+            .filter(|call| call.contains_offset(offset))
+            .min_by_key(|call| call.argument_span())?;
+        let declaration = self.resolve_at(uri, call.callee_range.start)?;
+        if !matches!(
+            declaration.kind,
+            DeclarationKind::Function | DeclarationKind::Event
+        ) {
+            return None;
+        }
+        let (argument_index, argument_name) = call.argument_at(offset)?;
+        let active_parameter = if let Some(name) = argument_name {
+            declaration
+                .parameters
+                .iter()
+                .position(|parameter| parameter.name.eq_ignore_ascii_case(name))
+        } else {
+            (argument_index < declaration.parameters.len()).then_some(argument_index)
+        }
+        .and_then(|index| u32::try_from(index).ok());
+        let parameters = declaration
+            .parameters
+            .iter()
+            .map(|parameter| ParameterInformation {
+                label: ParameterLabel::Simple(format!(
+                    "{} {}",
+                    parameter.ty.display(),
+                    parameter.name
+                )),
+                documentation: None,
+            })
+            .collect();
+        Some(SignatureHelp {
+            signatures: vec![SignatureInformation {
+                label: declaration.signature(),
+                documentation: declaration.documentation.clone().map(Documentation::String),
+                parameters: Some(parameters),
+                active_parameter: None,
+            }],
+            active_signature: Some(0),
+            active_parameter,
+        })
     }
 
     fn selection_range_at(&self, current: &IndexedDocument, position: Position) -> Option<Range> {
@@ -479,4 +536,195 @@ fn receiver_before_member(text: &str, offset: usize) -> Option<String> {
         start -= 1;
     }
     receiver_before_dot(text, start)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use lsp_types::{ParameterLabel, Position};
+
+    use crate::{
+        config::WorkspaceConfig,
+        line_index::LineIndex,
+        workspace::{WorkspaceIndex, path_to_file_uri},
+    };
+
+    #[test]
+    fn provides_signature_help_for_inherited_imported_named_and_nested_calls() {
+        let root = temp_root("signature-help");
+        fs::write(
+            root.join("Base.psc"),
+            concat!(
+                "ScriptName Base\n",
+                "{Jump documentation}\n",
+                "Function Jump(Int Count, String Label)\n",
+                "EndFunction\n",
+            ),
+        )
+        .unwrap();
+        fs::write(root.join("Actor.psc"), "ScriptName Actor Extends Base\n").unwrap();
+        fs::write(
+            root.join("Utility.psc"),
+            concat!(
+                "ScriptName Utility\n",
+                "{Log documentation}\n",
+                "Function Log(String Text, Int Level) Global\n",
+                "EndFunction\n",
+            ),
+        )
+        .unwrap();
+        let source = concat!(
+            "ScriptName Project\n",
+            "Import Utility\n",
+            "Actor Target\n",
+            "Function Test()\n",
+            "  Target.Jump(1, \"local\")\n",
+            "  Utility.Log(\"qualified\", 2)\n",
+            "  Log(Level = 3, Text = \"named\")\n",
+            "  Target.Jump(1, Utility.Log(\"nested\", 4))\n",
+            "  Missing(1)\n",
+            "EndFunction\n",
+        );
+        let project = root.join("Project.psc");
+        fs::write(&project, source).unwrap();
+        let mut index = WorkspaceIndex::new(&WorkspaceConfig {
+            source_roots: vec![root.clone()],
+            ..WorkspaceConfig::default()
+        })
+        .unwrap();
+        let uri = path_to_file_uri(&project).unwrap();
+
+        let inherited = index
+            .signature_help(&uri, position_in(source, "\"local\"", 1))
+            .unwrap();
+        assert_eq!(
+            inherited.signatures[0].label,
+            "Jump(Int Count, String Label)"
+        );
+        assert_eq!(inherited.active_parameter, Some(1));
+        assert_eq!(
+            inherited.signatures[0].documentation,
+            Some(lsp_types::Documentation::String(
+                "Jump documentation".to_owned()
+            ))
+        );
+
+        let qualified = index
+            .signature_help(&uri, position_in(source, "qualified\", 2", 12))
+            .unwrap();
+        assert_eq!(qualified.signatures[0].label, "Log(String Text, Int Level)");
+        assert_eq!(qualified.active_parameter, Some(1));
+
+        let named = index
+            .signature_help(&uri, position_in(source, "Text = \"named\"", 1))
+            .unwrap();
+        assert_eq!(named.active_parameter, Some(0));
+        assert_eq!(
+            named.signatures[0].parameters.as_ref().unwrap()[0].label,
+            ParameterLabel::Simple("String Text".to_owned())
+        );
+
+        let reordered_named = index
+            .signature_help(&uri, position_in(source, "Level = 3", 1))
+            .unwrap();
+        assert_eq!(reordered_named.active_parameter, Some(1));
+
+        let nested = index
+            .signature_help(&uri, position_in(source, "\"nested\"", 1))
+            .unwrap();
+        assert_eq!(nested.signatures[0].label, "Log(String Text, Int Level)");
+        assert_eq!(nested.active_parameter, Some(0));
+
+        assert!(
+            index
+                .signature_help(&uri, position_in(source, "Missing(", "Missing(".len()))
+                .is_none()
+        );
+
+        let incomplete = concat!(
+            "ScriptName Project\n",
+            "Actor Target\n",
+            "Function Test()\n",
+            "  Target.Jump(1,\n",
+            "EndFunction\n",
+        );
+        index.overlay(uri.clone(), incomplete);
+        let incomplete_help = index
+            .signature_help(
+                &uri,
+                position_in(incomplete, "Target.Jump(1,", "Target.Jump(1,".len()),
+            )
+            .unwrap();
+        assert_eq!(
+            incomplete_help.signatures[0].label,
+            "Jump(Int Count, String Label)"
+        );
+        assert_eq!(incomplete_help.active_parameter, Some(1));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn returns_no_signature_help_for_an_ambiguous_receiver_type() {
+        let root = temp_root("ambiguous-signature-help");
+        let first = root.join("first");
+        let second = root.join("second");
+        let project_root = root.join("project");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+        fs::write(
+            first.join("Actor.psc"),
+            "ScriptName Actor\nFunction Jump(Int Count)\nEndFunction\n",
+        )
+        .unwrap();
+        fs::write(
+            second.join("Actor.psc"),
+            "ScriptName Actor\nFunction Jump(String Label)\nEndFunction\n",
+        )
+        .unwrap();
+        let source = concat!(
+            "ScriptName Project\n",
+            "Actor Target\n",
+            "Function Test()\n",
+            "  Target.Jump(1)\n",
+            "EndFunction\n",
+        );
+        let project = project_root.join("Project.psc");
+        fs::write(&project, source).unwrap();
+        let index = WorkspaceIndex::new(&WorkspaceConfig {
+            source_roots: vec![project_root],
+            import_directories: vec![first, second],
+            ..WorkspaceConfig::default()
+        })
+        .unwrap();
+        let uri = path_to_file_uri(&project).unwrap();
+
+        assert!(
+            index
+                .signature_help(&uri, position_in(source, "Jump(", "Jump(".len()))
+                .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn position_in(source: &str, needle: &str, relative_offset: usize) -> Position {
+        let offset = source.find(needle).unwrap() + relative_offset;
+        LineIndex::new(source).position(source, offset)
+    }
+
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "papyrus-{label}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
 }

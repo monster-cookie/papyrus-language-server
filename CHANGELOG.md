@@ -13,6 +13,7 @@
 - Filtered constant-style members from instance completion while retaining explicit hover and go to definition.
 - Fixed LSP file URIs produced from Windows extended-length drive and UNC paths.
 - Added conservative, workspace-wide find references with scope, inheritance, import, ambiguity, overlay, and identical-alias handling.
+- Added source-derived signature help for positional, named, inherited, imported, script-qualified, nested, and incomplete calls.
 - Persisted syntax-backed identifier occurrences in semantic cache schema v4 without storing source text.
 - Split semantic navigation and shared resolution from the workspace indexing and completion module.
 

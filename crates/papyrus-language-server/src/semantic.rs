@@ -60,6 +60,47 @@ pub(crate) struct SemanticOccurrence {
     pub(crate) byte_offset: usize,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct SemanticCallSite {
+    pub(crate) callee_range: Range,
+    argument_range: ByteRange<usize>,
+    separators: Vec<usize>,
+    arguments: Vec<SemanticCallArgument>,
+}
+
+#[derive(Clone, Debug)]
+struct SemanticCallArgument {
+    name: Option<String>,
+    byte_range: ByteRange<usize>,
+}
+
+impl SemanticCallSite {
+    pub(crate) fn contains_offset(&self, offset: usize) -> bool {
+        self.argument_range.start <= offset && offset <= self.argument_range.end
+    }
+
+    pub(crate) fn argument_at(&self, offset: usize) -> Option<(usize, Option<&str>)> {
+        if !self.contains_offset(offset) {
+            return None;
+        }
+        let index = self
+            .separators
+            .partition_point(|separator| *separator < offset);
+        let name = self
+            .arguments
+            .get(index)
+            .filter(|argument| argument.byte_range.start <= offset)
+            .and_then(|argument| argument.name.as_deref());
+        Some((index, name))
+    }
+
+    pub(crate) fn argument_span(&self) -> usize {
+        self.argument_range
+            .end
+            .saturating_sub(self.argument_range.start)
+    }
+}
+
 impl Declaration {
     pub(crate) fn signature(&self) -> String {
         match self.kind {
@@ -98,6 +139,8 @@ pub(crate) struct SemanticDocument {
     pub(crate) declarations: Vec<Declaration>,
     pub(crate) occurrences: Vec<SemanticOccurrence>,
     #[serde(skip)]
+    pub(crate) call_sites: Vec<SemanticCallSite>,
+    #[serde(skip)]
     pub(crate) symbols: Vec<DocumentSymbol>,
 }
 
@@ -123,6 +166,7 @@ impl SemanticExtractor {
             imports: Vec::new(),
             declarations: Vec::new(),
             occurrences: Vec::new(),
+            call_sites: Vec::new(),
             symbols: Vec::new(),
         };
         let Some(tree) = self.parser.parse(source, None) else {
@@ -159,8 +203,156 @@ impl SemanticExtractor {
             &document.declarations,
             &mut document.occurrences,
         );
+        collect_call_sites(
+            root,
+            source,
+            &line_index,
+            &document.declarations,
+            &mut document.call_sites,
+        );
+        document.call_sites.sort_by_key(|call| {
+            (
+                call.callee_range.start,
+                call.argument_range.start,
+                call.argument_range.end,
+            )
+        });
+        document.call_sites.dedup_by(|left, right| {
+            left.callee_range == right.callee_range && left.argument_range == right.argument_range
+        });
         document
     }
+}
+
+fn collect_call_sites(
+    node: Node<'_>,
+    source: &str,
+    index: &LineIndex,
+    declarations: &[Declaration],
+    output: &mut Vec<SemanticCallSite>,
+) {
+    if node.kind() == "call_expression"
+        && let Some(call_site) = call_site(node, source, index)
+    {
+        output.push(call_site);
+    } else if node.kind() == "ERROR" {
+        output.extend(recovered_call_sites(node, source, index, declarations));
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_call_sites(child, source, index, declarations, output);
+    }
+}
+
+fn call_site(node: Node<'_>, source: &str, index: &LineIndex) -> Option<SemanticCallSite> {
+    let function = node.child_by_field_name("function")?;
+    let callee = if function.kind() == "member_expression" {
+        function.child_by_field_name("member")?
+    } else {
+        function
+    };
+    let arguments = node.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    let children = arguments.children(&mut cursor).collect::<Vec<_>>();
+    call_site_from_children(
+        callee.byte_range(),
+        &children,
+        arguments.end_byte(),
+        source,
+        index,
+    )
+}
+
+fn recovered_call_sites(
+    node: Node<'_>,
+    source: &str,
+    index: &LineIndex,
+    declarations: &[Declaration],
+) -> Vec<SemanticCallSite> {
+    let mut cursor = node.walk();
+    let children = node.children(&mut cursor).collect::<Vec<_>>();
+    children
+        .iter()
+        .enumerate()
+        .filter(|(_, child)| child.kind() == "(" && !child.is_missing())
+        .filter_map(|(open_index, open)| {
+            let callee = identifier_range_before(source, open.start_byte())?;
+            let callee_range = index.range(source, callee.clone());
+            if declarations
+                .iter()
+                .any(|declaration| declaration.selection_range == callee_range)
+            {
+                return None;
+            }
+            call_site_from_children(
+                callee,
+                &children[open_index..],
+                node.end_byte(),
+                source,
+                index,
+            )
+        })
+        .collect()
+}
+
+fn call_site_from_children(
+    callee: ByteRange<usize>,
+    children: &[Node<'_>],
+    fallback_end: usize,
+    source: &str,
+    index: &LineIndex,
+) -> Option<SemanticCallSite> {
+    let open = children
+        .iter()
+        .find(|child| child.kind() == "(" && !child.is_missing())?;
+    let close = children
+        .iter()
+        .find(|child| child.kind() == ")" && !child.is_missing());
+    let argument_start = open.end_byte();
+    let argument_end = close
+        .map(|child| child.start_byte())
+        .unwrap_or(fallback_end)
+        .max(argument_start);
+    let separators = children
+        .iter()
+        .filter(|child| {
+            child.kind() == ","
+                && argument_start <= child.start_byte()
+                && child.start_byte() <= argument_end
+        })
+        .map(|child| child.start_byte())
+        .collect();
+    let arguments = children
+        .iter()
+        .filter(|child| {
+            child.kind() == "argument"
+                && argument_start <= child.start_byte()
+                && child.end_byte() <= argument_end
+        })
+        .map(|argument| SemanticCallArgument {
+            name: field_text(*argument, "name", source),
+            byte_range: argument.byte_range(),
+        })
+        .collect();
+    Some(SemanticCallSite {
+        callee_range: index.range(source, callee),
+        argument_range: argument_start..argument_end,
+        separators,
+        arguments,
+    })
+}
+
+fn identifier_range_before(source: &str, offset: usize) -> Option<ByteRange<usize>> {
+    let bytes = source.as_bytes();
+    let mut end = offset.min(bytes.len());
+    while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+        start -= 1;
+    }
+    (start < end).then_some(start..end)
 }
 
 fn collect_occurrences(
@@ -486,5 +678,58 @@ mod tests {
                 .iter()
                 .any(|occurrence| occurrence.name == "Example")
         );
+    }
+
+    #[test]
+    fn extracts_nested_call_sites_and_tracks_positional_and_named_arguments() {
+        let source = concat!(
+            "ScriptName Example\n",
+            "Function Test()\n",
+            "  Outer(First, Inner(name = Second, Third), Last)\n",
+            "EndFunction\n",
+        );
+        let document = SemanticExtractor::new()
+            .unwrap()
+            .extract(Uri::from_str("file:///Example.psc").unwrap(), source);
+        assert_eq!(document.call_sites.len(), 2);
+
+        let outer = document
+            .call_sites
+            .iter()
+            .find(|call| {
+                call.callee_range.start.line == 2 && call.callee_range.start.character == 2
+            })
+            .unwrap();
+        let last = source.find("Last").unwrap() + 1;
+        assert_eq!(outer.argument_at(last), Some((2, None)));
+
+        let inner = document
+            .call_sites
+            .iter()
+            .find(|call| {
+                call.callee_range.start.line == 2 && call.callee_range.start.character == 15
+            })
+            .unwrap();
+        let named = source.find("name =").unwrap() + 1;
+        assert_eq!(inner.argument_at(named), Some((0, Some("name"))));
+        let third = source.find("Third").unwrap() + 1;
+        assert_eq!(inner.argument_at(third), Some((1, None)));
+        assert!(inner.argument_span() < outer.argument_span());
+    }
+
+    #[test]
+    fn extracts_an_incomplete_call_after_a_trailing_separator() {
+        let source = concat!(
+            "ScriptName Example\n",
+            "Function Test()\n",
+            "  Resolve(First,\n",
+            "EndFunction\n",
+        );
+        let document = SemanticExtractor::new()
+            .unwrap()
+            .extract(Uri::from_str("file:///Example.psc").unwrap(), source);
+        let call = document.call_sites.first().unwrap();
+        let offset = source.find("First,").unwrap() + "First,".len();
+        assert_eq!(call.argument_at(offset), Some((1, None)));
     }
 }
