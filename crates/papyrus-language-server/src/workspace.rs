@@ -255,6 +255,12 @@ impl WorkspaceIndex {
                     self.unique_script(&receiver)
                         .map(|(_, script)| self.members_of(script))
                 })
+                .map(|declarations| {
+                    declarations
+                        .into_iter()
+                        .filter(|declaration| is_instance_completion_candidate(declaration))
+                        .collect()
+                })
                 .unwrap_or_default()
         } else {
             let mut visible = current
@@ -487,7 +493,6 @@ impl WorkspaceIndex {
                         declaration.kind,
                         DeclarationKind::Script | DeclarationKind::Parameter
                     )
-                    && !declaration.is_const
                     && !declaration.is_global
                     && !members.iter().any(|existing: &&Declaration| {
                         existing.name.eq_ignore_ascii_case(&declaration.name)
@@ -533,6 +538,14 @@ impl WorkspaceIndex {
             })
             .collect()
     }
+}
+
+fn is_instance_completion_candidate(declaration: &Declaration) -> bool {
+    !declaration.is_const
+        && !declaration
+            .name
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("CONST_"))
 }
 
 fn normalized_content_hash(text: &str) -> blake3::Hash {
@@ -682,13 +695,23 @@ fn is_papyrus_file(path: &Path) -> bool {
 
 fn path_to_file_uri(path: &Path) -> Option<Uri> {
     let absolute = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
-    let display = absolute.to_string_lossy().replace('\\', "/");
-    let prefix = if display.starts_with('/') {
+    let display = normalize_windows_path(&absolute.to_string_lossy()).replace('\\', "/");
+    let prefix = if display.starts_with("//") {
+        "file:"
+    } else if display.starts_with('/') {
         "file://"
     } else {
         "file:///"
     };
     Uri::from_str(&format!("{prefix}{}", percent_encode_path(&display))).ok()
+}
+
+fn normalize_windows_path(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_owned()
+    }
 }
 
 fn percent_encode_path(path: &str) -> String {
@@ -714,7 +737,7 @@ mod tests {
 
     use crate::WorkspaceConfig;
 
-    use super::{WorkspaceIndex, path_to_file_uri};
+    use super::{WorkspaceIndex, normalize_windows_path, path_to_file_uri};
 
     #[test]
     fn completes_only_resolved_members_and_follows_inheritance() {
@@ -908,6 +931,8 @@ mod tests {
             concat!(
                 "ScriptName Actor\n",
                 "Int CONST_Distance = 1 Const\n",
+                "Int Property CONST_NearDistance_Close = 0 AutoReadOnly\n",
+                "Int Property ReadOnlyValue = 1 AutoReadOnly\n",
                 "Function Build() Global\nEndFunction\n",
                 "Function SetValueInt()\nEndFunction\n",
             ),
@@ -929,9 +954,58 @@ mod tests {
             Position::new(3, 9),
         );
         assert!(items.iter().any(|item| item.label == "SetValueInt"));
+        assert!(items.iter().any(|item| item.label == "ReadOnlyValue"));
         assert!(!items.iter().any(|item| item.label == "CONST_Distance"));
+        assert!(
+            !items
+                .iter()
+                .any(|item| item.label == "CONST_NearDistance_Close")
+        );
         assert!(!items.iter().any(|item| item.label == "Build"));
+
+        fs::write(
+            &project_path,
+            "ScriptName Project\nActor player\nFunction Test()\n  player.CONST_NearDistance_Close\nEndFunction\n",
+        )
+        .unwrap();
+        let uri = path_to_file_uri(&project_path).unwrap();
+        let mut index = index;
+        index.overlay(
+            uri.clone(),
+            "ScriptName Project\nActor player\nFunction Test()\n  player.CONST_NearDistance_Close\nEndFunction\n",
+        );
+        assert!(index.hover(&uri, Position::new(3, 12)).is_some());
+        assert_eq!(
+            index.definition(&uri, Position::new(3, 12)).unwrap().uri,
+            path_to_file_uri(&root.join("Actor.psc")).unwrap()
+        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn normalizes_windows_extended_paths_for_file_uris() {
+        assert_eq!(
+            normalize_windows_path(r"\\?\C:\Repositories\Project\Script.psc"),
+            r"C:\Repositories\Project\Script.psc"
+        );
+        assert_eq!(
+            path_to_file_uri(std::path::Path::new(
+                r"\\?\C:\Repositories\Project\Script.psc"
+            ))
+            .unwrap()
+            .as_str(),
+            "file:///C:/Repositories/Project/Script.psc"
+        );
+        assert_eq!(
+            normalize_windows_path(r"\\?\UNC\server\share\Script.psc"),
+            r"\\server\share\Script.psc"
+        );
+        assert_eq!(
+            path_to_file_uri(std::path::Path::new(r"\\?\UNC\server\share\Script.psc"))
+                .unwrap()
+                .as_str(),
+            "file://server/share/Script.psc"
+        );
     }
 
     fn temp_root(label: &str) -> std::path::PathBuf {

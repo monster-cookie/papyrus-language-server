@@ -10,6 +10,8 @@
 - Added Windows Steam discovery for Starfield Creation Kit source archives.
 - Added a fingerprinted local cache of navigable SFCK sources with generated-fragment filtering.
 - Added conservative ambiguity handling that returns no semantic claim instead of guessing.
+- Filtered constant-style members from instance completion while retaining explicit hover and go to definition.
+- Fixed LSP file URIs produced from Windows extended-length drive and UNC paths.
 
 ## Version 0.1.0 (August 2nd, 2026)
 

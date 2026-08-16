@@ -21,7 +21,10 @@ Rust tests verify:
 - document and workspace symbols reflect unsaved text;
 - closing an overlaid document restores its disk-backed symbols;
 - inheritance-aware member completion excludes unresolved and ambiguous receivers;
+- instance completion excludes `Const` and conventional `CONST_` members while retaining ordinary `AutoReadOnly` properties;
+- explicitly written constant-style members still resolve for hover and go to definition;
 - hover and go to definition resolve the same source-derived declaration;
+- Windows extended-length drive and UNC paths normalize before conversion to LSP file URIs;
 - Steam manifest discovery and ZIP cache extraction use synthetic temporary fixtures;
 - generated fragment filters retain reusable quest and perk base scripts;
 - initialize, initialized, shutdown, and exit complete successfully over an in-memory LSP connection.

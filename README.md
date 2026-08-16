@@ -49,7 +49,7 @@ Editors may supply settings through `initializationOptions.papyrus`:
 }
 ```
 
-`dialect` accepts `auto`, `skyrim`, `fallout4`, or `starfield` and defaults to `auto`. When `sourceRoots` is omitted, the server indexes the file-based LSP workspace folders. Import directories are indexed alongside project roots. The current milestone records the dialect for later semantic work; `auto` does not yet infer a dialect.
+`dialect` accepts `auto`, `skyrim`, `fallout4`, or `starfield` and defaults to `auto`. When `sourceRoots` is omitted, the server indexes the file-based LSP workspace folders. Import directories are indexed alongside project roots. The selected dialect controls dialect-specific source discovery; `auto` does not infer a dialect or enable dialect-specific discovery.
 
 When `dialect` is `starfield`, the server also discovers Steam's Starfield Creation Kit installation. It extracts reusable `.psc` files from `Tools/ContentResources.zip` into `%LOCALAPPDATA%\papyrus-language-server\cache`, excluding generated `Fragments` and `QF_`, `PF_`, `TIF_`, and `SF_` scripts. Cached source remains local and provides navigable definitions; project files are never filtered.
 

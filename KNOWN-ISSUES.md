@@ -1,6 +1,6 @@
 # Known issues and deferred work
 
-## Workspace-foundation milestone
+## Semantic-navigation milestone
 
 The server provides syntax diagnostics, semantic completion, hover, definition, and document/workspace symbols. It does not yet provide:
 
@@ -19,7 +19,7 @@ For a missing closing keyword, the server reports the conflicting closer or the 
 
 ## Workspace scope
 
-The index scans configured source roots and import directories and overlays open buffers. Indexing is synchronous and in-memory, and `auto` does not infer a game dialect. Starfield SDK discovery requires an installed Steam Creation Kit and an explicit `starfield` dialect. Unsupported or ambiguous expressions intentionally produce no IntelliSense result.
+The index scans configured source roots and import directories and overlays open buffers. Indexing is synchronous, the active index is held in memory, and parsed declarations are restored from a local cache when source metadata and fingerprints match. `auto` does not infer a game dialect. Starfield SDK discovery requires an installed Steam Creation Kit and an explicit `starfield` dialect. Unsupported or ambiguous expressions intentionally produce no IntelliSense result.
 
 Old fingerprinted SDK cache generations are not automatically removed yet.
 
@@ -36,4 +36,4 @@ Other operating systems, architectures, and Linux C library environments must bu
 
 ## Compiler and game discovery
 
-The server does not read the Windows registry, Steam libraries, Creation Kit installations, compiler flags, installed game scripts, or user projects automatically. Future compiler integration will require explicit user configuration with optional discovery as a convenience; it must not distribute Bethesda tools or source.
+With the `starfield` dialect selected on Windows, the server reads Steam installation metadata to locate the Starfield Creation Kit source archive. It does not automatically discover compiler executables, compiler flags, installed game scripts outside that archive, or user projects. Future compiler integration will require explicit user configuration with optional discovery as a convenience; it must not distribute Bethesda tools or source.

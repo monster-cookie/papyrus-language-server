@@ -42,18 +42,23 @@ The semantic index retains declared types, signatures, scopes, inheritance, sour
 
 On Windows with the Starfield dialect selected, Steam metadata locates app `2722710` and `Tools/ContentResources.zip`. Reusable `Scripts/Source` entries are extracted to a fingerprinted `%LOCALAPPDATA%` cache so definitions remain navigable. Generated fragment paths and standard fragment-name prefixes are excluded only from discovered SDK sources.
 
+Windows extended-length drive and UNC paths are normalized before conversion to LSP file URIs so navigation locations remain consumable by editor clients.
+
 Standard output is reserved for protocol traffic. Fatal operational errors are written to standard error.
 
 ## Approved dependencies
 
 | Dependency | Responsibility | License |
 | --- | --- | --- |
+| `blake3` | Semantic source fingerprinting | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception |
 | `tree-sitter` | Incremental native parser runtime | MIT |
 | `tree-sitter-language` | Version-independent generated grammar handle | MIT |
 | `cc` | Compile the generated C parser during Rust builds | MIT OR Apache-2.0 |
 | `lsp-server` | Synchronous JSON-RPC/LSP transport scaffold | MIT OR Apache-2.0 |
 | `lsp-types` | Language Server Protocol data types | MIT |
 | `serde` and `serde_json` | Protocol serialization and deserialization | MIT OR Apache-2.0 |
+| `winreg` | Windows Steam installation discovery | MIT |
+| `zip` | Starfield Creation Kit source archive extraction | MIT |
 | `tree-sitter-cli` | Parser generation and native corpus tests | MIT |
 | `web-tree-sitter` | Cross-platform WebAssembly fixture validation | MIT |
 
