@@ -35,7 +35,17 @@ fn advertises_and_serves_source_derived_intellisense() {
         1,
         "initialize",
         json!({
-            "capabilities": {},
+            "capabilities": {
+                "workspace": {
+                    "workspaceEdit": {
+                        "documentChanges": true,
+                        "resourceOperations": ["rename"]
+                    }
+                },
+                "textDocument": {
+                    "rename": { "prepareSupport": true }
+                }
+            },
             "initializationOptions": { "papyrus": {
                 "dialect": "auto",
                 "sourceRoots": [root.to_string_lossy()]
@@ -50,6 +60,10 @@ fn advertises_and_serves_source_derived_intellisense() {
     assert_eq!(capabilities["capabilities"]["hoverProvider"], true);
     assert_eq!(capabilities["capabilities"]["definitionProvider"], true);
     assert_eq!(capabilities["capabilities"]["referencesProvider"], true);
+    assert_eq!(
+        capabilities["capabilities"]["renameProvider"]["prepareProvider"],
+        true
+    );
     assert_eq!(
         capabilities["capabilities"]["signatureHelpProvider"]["triggerCharacters"][0],
         "("
@@ -160,7 +174,96 @@ fn advertises_and_serves_source_derived_intellisense() {
         "Source evidence"
     );
 
-    send_request(&client, 7, "shutdown", json!(null));
+    send_request(
+        &client,
+        7,
+        "textDocument/prepareRename",
+        json!({
+            "textDocument": { "uri": uri }, "position": { "line": 3, "character": 11 }
+        }),
+    );
+    let prepare_rename = receive_response(&client);
+    assert_eq!(prepare_rename["placeholder"], "Jump");
+    assert_eq!(prepare_rename["range"]["start"]["line"], 3);
+
+    send_request(
+        &client,
+        8,
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 3, "character": 11 },
+            "newName": "Leap"
+        }),
+    );
+    let member_rename = receive_response(&client);
+    let member_operations = member_rename["documentChanges"].as_array().unwrap();
+    assert_eq!(member_operations.len(), 2);
+    assert!(
+        member_operations
+            .iter()
+            .all(|operation| operation["kind"].is_null())
+    );
+    assert_eq!(
+        member_operations
+            .iter()
+            .flat_map(|operation| operation["edits"].as_array().unwrap())
+            .filter(|edit| edit["newText"] == "Leap")
+            .count(),
+        2
+    );
+
+    let actor_uri = path_uri(&root.join("Actor.psc"));
+    send_request(
+        &client,
+        9,
+        "textDocument/prepareRename",
+        json!({
+            "textDocument": { "uri": actor_uri }, "position": { "line": 0, "character": 12 }
+        }),
+    );
+    let prepare_script_rename = receive_response(&client);
+    assert_eq!(prepare_script_rename["placeholder"], "Actor");
+
+    send_request(
+        &client,
+        10,
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": actor_uri },
+            "position": { "line": 0, "character": 12 },
+            "newName": "RenamedActor"
+        }),
+    );
+    let script_rename = receive_response(&client);
+    let script_operations = script_rename["documentChanges"].as_array().unwrap();
+    let file_rename = script_operations
+        .iter()
+        .find(|operation| operation["kind"] == "rename")
+        .unwrap();
+    assert!(
+        file_rename["oldUri"]
+            .as_str()
+            .unwrap()
+            .ends_with("Actor.psc")
+    );
+    assert!(
+        file_rename["newUri"]
+            .as_str()
+            .unwrap()
+            .ends_with("RenamedActor.psc")
+    );
+    assert_eq!(
+        script_operations
+            .iter()
+            .filter(|operation| operation["kind"].is_null())
+            .flat_map(|operation| operation["edits"].as_array().unwrap())
+            .filter(|edit| edit["newText"] == "RenamedActor")
+            .count(),
+        2
+    );
+
+    send_request(&client, 11, "shutdown", json!(null));
     receive_response(&client);
     client
         .sender

@@ -31,10 +31,14 @@ Rust tests verify:
 - reference extraction excludes declaration names, named-argument labels, comments, and strings;
 - unsaved overlays rebuild references, closing restores disk-backed occurrences, and cached occurrences work without retained source text;
 - identical source aliases contribute references only from the canonical navigation copy;
+- rename reuses resolved declarations and references for scoped symbols, inherited members, imported globals and structs, and unsaved overlays while excluding comments and strings;
+- rename rejects invalid or reserved identifiers, case-insensitive scope collisions, ambiguous targets, and declarations outside project source roots;
+- script rename emits ordered text edits and a same-namespace `RenameFile`, rejects clients without file-operation support, and refuses namespace changes, mismatched filenames, and existing destinations;
 - Windows extended-length drive and UNC paths normalize before conversion to LSP file URIs;
 - Steam manifest discovery, installed-source preference, ZIP cache fallback, and discovered-source filtering use synthetic temporary fixtures;
 - generated fragment filters retain reusable quest and perk base scripts;
-- initialize advertises completion, hover, definition, references, and signature help; those requests plus initialized, shutdown, and exit complete successfully over an in-memory LSP connection.
+- initialize advertises completion, hover, definition, references, rename with prepare support, and signature help; those requests plus initialized, shutdown, and exit complete successfully over an in-memory LSP connection;
+- the in-memory LSP connection returns multi-document rename edits and a script `RenameFile` operation when the client advertises the required workspace-edit capabilities.
 
 ## Downstream Zed acceptance
 

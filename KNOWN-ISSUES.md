@@ -2,9 +2,8 @@
 
 ## Semantic-navigation milestone
 
-The server provides syntax diagnostics, semantic completion, hover, definition, references, signature help, and document/workspace symbols. It does not yet provide:
+The server provides syntax diagnostics, semantic completion, hover, definition, references, rename, signature help, and document/workspace symbols. It does not yet provide:
 
-- rename;
 - full expression type inference;
 - semantic type checking;
 - compiler discovery or automatic compilation;
@@ -20,6 +19,8 @@ For a missing closing keyword, the server reports the conflicting closer or the 
 ## Workspace scope
 
 The index scans configured source roots and import directories and overlays open buffers. Indexing is synchronous, the active index is held in memory, and parsed declarations and identifier occurrences are restored from a local cache when source metadata and fingerprints match. `auto` does not infer a game dialect. Starfield SDK discovery requires an installed Steam Creation Kit and an explicit `starfield` dialect. Unsupported or ambiguous expressions intentionally produce no IntelliSense or reference result.
+
+Rename edits declarations and resolved occurrences in project source roots only. Configured imports and discovered SDK sources are read-only. Script rename can rename the matching `.psc` file when the client supports LSP rename-file operations, but the namespace prefix cannot change and namespace-directory moves are not inferred.
 
 Old fingerprinted SDK cache generations are not automatically removed yet.
 

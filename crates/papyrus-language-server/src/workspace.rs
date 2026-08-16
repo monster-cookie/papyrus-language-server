@@ -7,6 +7,7 @@ use std::{
 };
 
 mod navigation;
+mod rename;
 
 use lsp_types::{
     CompletionItem, CompletionItemKind, DocumentSymbol, Documentation, Location, Position,

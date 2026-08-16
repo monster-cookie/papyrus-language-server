@@ -21,7 +21,8 @@
 - Source-derived completion, hover, and go to definition.
 - Starfield Creation Kit source discovery and local navigable cache.
 - References and signature help.
-- Rename and semantic diagnostics.
+- Conservative project-source rename, including same-namespace script file renames.
+- Semantic diagnostics.
 
 ## 0.4: Optional compiler integration
 

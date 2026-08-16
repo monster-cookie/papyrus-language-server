@@ -143,7 +143,11 @@ impl WorkspaceIndex {
         })
     }
 
-    fn selection_range_at(&self, current: &IndexedDocument, position: Position) -> Option<Range> {
+    pub(super) fn selection_range_at(
+        &self,
+        current: &IndexedDocument,
+        position: Position,
+    ) -> Option<Range> {
         current
             .semantic
             .declarations
@@ -169,7 +173,7 @@ impl WorkspaceIndex {
             })
     }
 
-    fn declaration_location(&self, declaration: &Declaration) -> Option<(Uri, Range)> {
+    pub(super) fn declaration_location(&self, declaration: &Declaration) -> Option<(Uri, Range)> {
         let document = self.documents.values().find(|entry| {
             entry
                 .semantic
@@ -180,7 +184,7 @@ impl WorkspaceIndex {
         Some((document.semantic.uri.clone(), declaration.selection_range))
     }
 
-    fn resolve_at(&self, uri: &Uri, position: Position) -> Option<&Declaration> {
+    pub(super) fn resolve_at(&self, uri: &Uri, position: Position) -> Option<&Declaration> {
         let current = self.documents.get(uri)?;
         if let Some(declaration) = current
             .semantic
@@ -442,7 +446,10 @@ impl WorkspaceIndex {
             .collect()
     }
 
-    fn canonical_declaration<'a>(&'a self, declaration: &'a Declaration) -> &'a Declaration {
+    pub(super) fn canonical_declaration<'a>(
+        &'a self,
+        declaration: &'a Declaration,
+    ) -> &'a Declaration {
         if declaration.kind == DeclarationKind::Script {
             return self
                 .unique_script(&declaration.name)

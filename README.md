@@ -2,7 +2,7 @@
 
 An editor-neutral language server and canonical Tree-sitter grammar for Bethesda's Papyrus scripting language.
 
-The project targets the Papyrus dialects used by Skyrim Anniversary Edition, Fallout 4, and Starfield. It provides native syntax diagnostics, source-derived completion, hover, go to definition, find references, signature help, document symbols, and a workspace symbol index.
+The project targets the Papyrus dialects used by Skyrim Anniversary Edition, Fallout 4, and Starfield. It provides native syntax diagnostics, source-derived completion, hover, go to definition, find references, rename, signature help, document symbols, and a workspace symbol index.
 
 No Bethesda compiler, flags file, or game source is distributed by this repository. The committed fixtures are original synthetic examples.
 
@@ -53,7 +53,9 @@ Editors may supply settings through `initializationOptions.papyrus`:
 
 When `dialect` is `starfield`, the server also discovers Steam's Starfield Creation Kit installation. It indexes an installed `Data/Scripts/Source` tree when present; otherwise, it extracts reusable `.psc` files from `Tools/ContentResources.zip` into `%LOCALAPPDATA%\papyrus-language-server\cache`. Automatically discovered sources exclude generated `Fragments` and `QF_`, `PF_`, `TIF_`, and `SF_` scripts. Installed or cached source remains local and provides navigable definitions; project files are never filtered.
 
-IntelliSense is deliberately conservative. Member completion is returned only when the receiver's declared type resolves uniquely, including inherited members. Hover, definition, references, and signature help use the same indexed declaration and never synthesize missing types, APIs, or documentation. Find References searches syntax-backed identifiers across the workspace, excludes comments and strings, respects local scopes and source precedence, and returns no claim for ambiguous or unsupported expressions. Signature help tracks positional and named arguments, including incomplete and nested calls, and suppresses unresolved or ambiguous callees.
+IntelliSense is deliberately conservative. Member completion is returned only when the receiver's declared type resolves uniquely, including inherited members. Hover, definition, references, rename, and signature help use the same indexed declaration and never synthesize missing types, APIs, or documentation. Find References searches syntax-backed identifiers across the workspace, excludes comments and strings, respects local scopes and source precedence, and returns no claim for ambiguous or unsupported expressions. Rename reuses those resolved locations, validates Papyrus identifiers and case-insensitive collisions, and edits project source roots only; configured imports and discovered SDK sources remain read-only. Signature help tracks positional and named arguments, including incomplete and nested calls, and suppresses unresolved or ambiguous callees.
+
+Renaming a project script updates its declaration and resolved references and, when the editor advertises LSP rename-file support, renames the matching `.psc` file in the same directory. The namespace prefix must remain unchanged, the current filename must match the script's terminal name, and the destination must not already exist. Namespace-directory moves are deliberately not inferred.
 
 Imported scripts contribute their declared structs and `Global` functions to completion, hover, go to definition, references, and signature help. Script-qualified global calls such as `Game.GetPlayer()` resolve against the indexed script source. Top-level `Const` values and `Global` functions are excluded from instance-member completion.
 

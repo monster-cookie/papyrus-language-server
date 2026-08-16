@@ -14,6 +14,7 @@
 - Fixed LSP file URIs produced from Windows extended-length drive and UNC paths.
 - Added conservative, workspace-wide find references with scope, inheritance, import, ambiguity, overlay, and identical-alias handling.
 - Added source-derived signature help for positional, named, inherited, imported, script-qualified, nested, and incomplete calls.
+- Added conservative project-source rename with identifier and collision validation, ambiguity safeguards, external-source protection, and same-namespace Papyrus script file renames through LSP workspace edits.
 - Persisted syntax-backed identifier occurrences in semantic cache schema v4 without storing source text.
 - Split semantic navigation and shared resolution from the workspace indexing and completion module.
 

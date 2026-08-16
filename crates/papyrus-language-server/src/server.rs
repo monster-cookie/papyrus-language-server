@@ -5,7 +5,8 @@ use lsp_types::{
     CompletionParams, CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentSymbolParams,
     DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, HoverParams,
-    InitializeParams, PublishDiagnosticsParams, ReferenceParams, SignatureHelpParams, Uri,
+    InitializeParams, PublishDiagnosticsParams, ReferenceParams, RenameParams,
+    ResourceOperationKind, SignatureHelpParams, TextDocumentPositionParams, Uri,
     WorkspaceSymbolParams,
 };
 
@@ -32,6 +33,7 @@ pub fn run_connection(connection: &Connection) -> ServerResult<()> {
     let (initialize_id, initialize_value) = connection.initialize_start()?;
     let initialize_params: InitializeParams = serde_json::from_value(initialize_value)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let rename_support = RenameSupport::from_initialize(&initialize_params);
     let mut config = WorkspaceConfig::from_initialize(&initialize_params);
     if config.dialect == PapyrusDialect::Starfield {
         if let Some(sources) = discover_starfield_sources() {
@@ -71,6 +73,7 @@ pub fn run_connection(connection: &Connection) -> ServerResult<()> {
             "hoverProvider": true,
             "definitionProvider": true,
             "referencesProvider": true,
+            "renameProvider": { "prepareProvider": true },
             "signatureHelpProvider": {
                 "triggerCharacters": ["("],
                 "retriggerCharacters": [","]
@@ -88,7 +91,7 @@ pub fn run_connection(connection: &Connection) -> ServerResult<()> {
     });
     connection.initialize_finish(initialize_id, initialize_result)?;
 
-    let mut server = Server::new(&config)?;
+    let mut server = Server::new(&config, rename_support)?;
     while let Ok(message) = connection.receiver.recv() {
         match message {
             Message::Request(request) => {
@@ -113,15 +116,17 @@ pub fn run_connection(connection: &Connection) -> ServerResult<()> {
 struct Server {
     analyzer: PapyrusAnalyzer,
     documents: DocumentStore,
+    rename_support: RenameSupport,
     workspace: WorkspaceIndex,
 }
 
 impl Server {
-    fn new(config: &WorkspaceConfig) -> ServerResult<Self> {
+    fn new(config: &WorkspaceConfig, rename_support: RenameSupport) -> ServerResult<Self> {
         let analyzer = PapyrusAnalyzer::new().map_err(std::io::Error::other)?;
         Ok(Self {
             analyzer,
             documents: DocumentStore::default(),
+            rename_support,
             workspace: WorkspaceIndex::new(config).map_err(std::io::Error::other)?,
         })
     }
@@ -184,6 +189,31 @@ impl Server {
                     params.context.include_declaration,
                 );
                 Response::new_ok(request.id, serde_json::to_value(result)?)
+            }
+            "textDocument/prepareRename" => {
+                let params: TextDocumentPositionParams =
+                    deserialize_request(request.params, "prepareRename")?;
+                let result = self.workspace.prepare_rename(
+                    &params.text_document.uri,
+                    params.position,
+                    self.rename_support.file_rename,
+                );
+                Response::new_ok(request.id, serde_json::to_value(result)?)
+            }
+            "textDocument/rename" => {
+                let params: RenameParams = deserialize_request(request.params, "rename")?;
+                match self.workspace.rename(
+                    &params.text_document_position.text_document.uri,
+                    params.text_document_position.position,
+                    &params.new_name,
+                    self.rename_support.document_changes,
+                    self.rename_support.file_rename,
+                ) {
+                    Ok(result) => Response::new_ok(request.id, serde_json::to_value(result)?),
+                    Err(message) => {
+                        Response::new_err(request.id, ErrorCode::InvalidParams as i32, message)
+                    }
+                }
             }
             "textDocument/signatureHelp" => {
                 let params: SignatureHelpParams =
@@ -272,6 +302,33 @@ impl Server {
         };
         let diagnostics = self.analyzer.diagnostics(&document.text);
         publish(connection, uri.clone(), diagnostics, document.version)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RenameSupport {
+    document_changes: bool,
+    file_rename: bool,
+}
+
+impl RenameSupport {
+    fn from_initialize(params: &InitializeParams) -> Self {
+        let workspace_edit = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.workspace_edit.as_ref());
+        let document_changes = workspace_edit
+            .and_then(|capabilities| capabilities.document_changes)
+            .unwrap_or(false);
+        let file_rename = document_changes
+            && workspace_edit
+                .and_then(|capabilities| capabilities.resource_operations.as_deref())
+                .is_some_and(|operations| operations.contains(&ResourceOperationKind::Rename));
+        Self {
+            document_changes,
+            file_rename,
+        }
     }
 }
 
