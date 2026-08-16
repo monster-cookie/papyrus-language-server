@@ -49,6 +49,7 @@ fn advertises_and_serves_source_derived_intellisense() {
     );
     assert_eq!(capabilities["capabilities"]["hoverProvider"], true);
     assert_eq!(capabilities["capabilities"]["definitionProvider"], true);
+    assert_eq!(capabilities["capabilities"]["referencesProvider"], true);
     client
         .sender
         .send(Message::Notification(Notification::new(
@@ -108,7 +109,30 @@ fn advertises_and_serves_source_derived_intellisense() {
     let definition = receive_response(&client);
     assert!(definition["uri"].as_str().unwrap().ends_with("Actor.psc"));
 
-    send_request(&client, 5, "shutdown", json!(null));
+    send_request(
+        &client,
+        5,
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 3, "character": 11 },
+            "context": { "includeDeclaration": true }
+        }),
+    );
+    let references = receive_response(&client);
+    let references = references.as_array().unwrap();
+    assert_eq!(references.len(), 2);
+    assert!(
+        references
+            .iter()
+            .any(|location| location["uri"].as_str().unwrap().ends_with("Actor.psc"))
+    );
+    assert!(references.iter().any(|location| {
+        location["uri"].as_str().unwrap().ends_with("Project.psc")
+            && location["range"]["start"]["line"] == 3
+    }));
+
+    send_request(&client, 6, "shutdown", json!(null));
     receive_response(&client);
     client
         .sender

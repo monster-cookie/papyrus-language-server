@@ -38,7 +38,11 @@ Initialization options select `auto`, `skyrim`, `fallout4`, or `starfield` and m
 
 The server recursively indexes `.psc` files under those roots in memory. Open documents overlay their disk-backed entries so symbol requests reflect unsaved text; closing a document restores its disk version. Tree-sitter declaration nodes produce hierarchical document symbols and a flattened, case-insensitive workspace-symbol view. Duplicate names remain in the index for later semantic resolution.
 
-The semantic index retains declared types, signatures, scopes, inheritance, source documentation, and locations. Project sources have precedence over configured imports, which have precedence over discovered SDK sources. Duplicate candidates at the same precedence are ambiguous and deliberately do not produce hover, definition, or member-completion claims.
+The semantic index retains declared types, signatures, scopes, inheritance, source documentation, locations, and syntax-backed identifier occurrences. Project sources have precedence over configured imports, which have precedence over discovered SDK sources. Duplicate candidates at the same precedence are ambiguous and deliberately do not produce hover, definition, reference, or member-completion claims.
+
+Workspace indexing and completion remain in `workspace.rs`; shared declaration resolution, hover, definition, and references are isolated in `workspace/navigation.rs`. Find References uses a case-insensitive occurrence lookup to narrow candidates, then resolves each candidate to the selected declaration. It never treats textual matches in comments or strings as references. Results honor lexical scopes and imports, use the canonical navigation copy for identical aliases, and are sorted and deduplicated by URI and range.
+
+Semantic cache schema v4 persists declarations and identifier occurrence metadata so references work on cache hits without retaining source text. Older cache generations are ignored rather than migrated or deleted.
 
 On Windows with the Starfield dialect selected, Steam metadata locates app `2722710` and `Tools/ContentResources.zip`. Reusable `Scripts/Source` entries are extracted to a fingerprinted `%LOCALAPPDATA%` cache so definitions remain navigable. Generated fragment paths and standard fragment-name prefixes are excluded only from discovered SDK sources.
 
@@ -62,8 +66,8 @@ Standard output is reserved for protocol traffic. Fatal operational errors are w
 | `tree-sitter-cli` | Parser generation and native corpus tests | MIT |
 | `web-tree-sitter` | Cross-platform WebAssembly fixture validation | MIT |
 
-The Node packages are development-only. Exact resolved Rust and Node versions are recorded in `Cargo.lock` and `package-lock.json`.
+The Node packages are development-only. Exact resolved Rust and Node versions are recorded in `Cargo.lock` and `package-lock.json`. The `tree-sitter-cli` install script is approved only for its exact locked version so npm can install the required native executable.
 
 ## Deferred layers
 
-References, rename, signature help, broader expression inference, semantic checking, compiler discovery, automatic compilation, and debugging remain deferred. Compiler integration must remain optional and must never redistribute Bethesda tools or source.
+Rename, signature help, broader expression inference, semantic checking, compiler discovery, automatic compilation, and debugging remain deferred. Compiler integration must remain optional and must never redistribute Bethesda tools or source.

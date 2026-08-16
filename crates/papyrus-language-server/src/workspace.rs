@@ -6,9 +6,11 @@ use std::{
     time::Instant,
 };
 
+mod navigation;
+
 use lsp_types::{
-    CompletionItem, CompletionItemKind, DocumentSymbol, Documentation, Hover, HoverContents,
-    Location, MarkupContent, MarkupKind, Position, SymbolInformation, Uri,
+    CompletionItem, CompletionItemKind, DocumentSymbol, Documentation, Location, Position,
+    SymbolInformation, Uri,
 };
 
 use crate::{
@@ -23,6 +25,7 @@ pub(crate) struct WorkspaceIndex {
     documents: HashMap<Uri, IndexedDocument>,
     semantic_extractor: SemanticExtractor,
     scripts_by_name: HashMap<String, Vec<Uri>>,
+    occurrences_by_name: HashMap<String, Vec<(Uri, usize)>>,
     index_cache: IndexCache,
 }
 
@@ -42,6 +45,7 @@ impl WorkspaceIndex {
             documents: HashMap::new(),
             semantic_extractor: SemanticExtractor::new()?,
             scripts_by_name: HashMap::new(),
+            occurrences_by_name: HashMap::new(),
             index_cache: IndexCache::load(),
         };
         index.scan();
@@ -191,12 +195,19 @@ impl WorkspaceIndex {
 
     fn rebuild_lookups(&mut self) {
         self.scripts_by_name.clear();
+        self.occurrences_by_name.clear();
         for (uri, document) in &self.documents {
             if let Some(name) = &document.semantic.script_name {
                 self.scripts_by_name
                     .entry(name.to_ascii_lowercase())
                     .or_default()
                     .push(uri.clone());
+            }
+            for (index, occurrence) in document.semantic.occurrences.iter().enumerate() {
+                self.occurrences_by_name
+                    .entry(occurrence.name.to_ascii_lowercase())
+                    .or_default()
+                    .push((uri.clone(), index));
             }
         }
     }
@@ -307,237 +318,6 @@ impl WorkspaceIndex {
         }
         items
     }
-
-    pub(crate) fn hover(&self, uri: &Uri, position: Position) -> Option<Hover> {
-        let current = self.documents.get(uri)?;
-        let offset =
-            LineIndex::new(&current.semantic.text).byte_offset(&current.semantic.text, position);
-        let hovered_range = word_byte_range(&current.semantic.text, offset).map(|range| {
-            LineIndex::new(&current.semantic.text).range(&current.semantic.text, range)
-        });
-        let declaration = self.resolve_at(uri, position)?;
-        let mut value = format!("```papyrus\n{}\n```", declaration.signature());
-        if let Some(owner) = &declaration.owner_script {
-            value.push_str(&format!("\n\nDeclared by `{owner}`."));
-        }
-        if let Some(documentation) = &declaration.documentation {
-            value.push_str("\n\n");
-            value.push_str(documentation);
-        }
-        if let Some((source_uri, _)) = self.declaration_location(declaration) {
-            value.push_str(&format!("\n\nSource: `{}`", source_uri.as_str()));
-        }
-        Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value,
-            }),
-            range: hovered_range,
-        })
-    }
-
-    pub(crate) fn definition(&self, uri: &Uri, position: Position) -> Option<Location> {
-        let declaration = self.resolve_at(uri, position)?;
-        let (source_uri, range) = self.declaration_location(declaration)?;
-        Some(Location::new(source_uri, range))
-    }
-
-    fn declaration_location(&self, declaration: &Declaration) -> Option<(Uri, lsp_types::Range)> {
-        let document = self.documents.values().find(|entry| {
-            entry
-                .semantic
-                .declarations
-                .iter()
-                .any(|candidate| std::ptr::eq(candidate, declaration))
-        })?;
-        Some((document.semantic.uri.clone(), declaration.selection_range))
-    }
-
-    fn resolve_at(&self, uri: &Uri, position: Position) -> Option<&Declaration> {
-        let current = self.documents.get(uri)?;
-        let offset =
-            LineIndex::new(&current.semantic.text).byte_offset(&current.semantic.text, position);
-        let name = word_at(&current.semantic.text, offset)?;
-        if let Some(receiver) = receiver_before_member(&current.semantic.text, offset) {
-            let receiver_declaration = self.resolve_visible_name(current, &receiver, offset)?;
-            let ty = &receiver_declaration.ty.as_ref()?.name;
-            return unique_named(self.members_of_type(current, ty), &name);
-        }
-        self.resolve_visible_name(current, &name, offset)
-            .or_else(|| {
-                self.unique_script(&name)
-                    .map(|(_, declaration)| declaration)
-            })
-    }
-
-    fn resolve_visible_name<'a>(
-        &'a self,
-        current: &'a IndexedDocument,
-        name: &str,
-        offset: usize,
-    ) -> Option<&'a Declaration> {
-        let scoped = current
-            .semantic
-            .declarations
-            .iter()
-            .filter(|declaration| declaration.name.eq_ignore_ascii_case(name))
-            .filter(|declaration| {
-                declaration.scope.contains(&offset) && declaration.container.is_some()
-            })
-            .collect::<Vec<_>>();
-        if let Some(declaration) = unique_named(scoped, name) {
-            return Some(declaration);
-        }
-        let top_level = current
-            .semantic
-            .declarations
-            .iter()
-            .filter(|declaration| {
-                declaration.name.eq_ignore_ascii_case(name) && declaration.container.is_none()
-            })
-            .collect::<Vec<_>>();
-        if let Some(declaration) = unique_named(top_level, name) {
-            return Some(declaration);
-        }
-        let script = current
-            .semantic
-            .script_name
-            .as_deref()
-            .and_then(|name| self.unique_script(name).map(|value| value.1))?;
-        unique_named(self.members_of(script), name).or_else(|| self.resolve_imported(current, name))
-    }
-
-    fn resolve_imported<'a>(
-        &'a self,
-        current: &'a IndexedDocument,
-        name: &str,
-    ) -> Option<&'a Declaration> {
-        let matches = current
-            .semantic
-            .imports
-            .iter()
-            .filter_map(|module| self.unique_script(module).map(|value| value.0))
-            .flat_map(|document| &document.semantic.declarations)
-            .filter(|declaration| declaration.name.eq_ignore_ascii_case(name))
-            .filter(|declaration| {
-                declaration.kind == DeclarationKind::Struct
-                    || (declaration.kind == DeclarationKind::Function && declaration.is_global)
-            })
-            .collect::<Vec<_>>();
-        unique_named(matches, name)
-    }
-
-    fn unique_scripts(&self) -> Vec<&Declaration> {
-        let names = self
-            .documents
-            .values()
-            .flat_map(|entry| &entry.semantic.declarations)
-            .filter(|declaration| declaration.kind == DeclarationKind::Script)
-            .map(|declaration| declaration.name.to_ascii_lowercase())
-            .collect::<HashSet<_>>();
-        names
-            .iter()
-            .filter_map(|name| self.unique_script(name).map(|(_, declaration)| declaration))
-            .collect()
-    }
-
-    fn unique_script(&self, name: &str) -> Option<(&IndexedDocument, &Declaration)> {
-        let mut candidates = self
-            .scripts_by_name
-            .get(&name.to_ascii_lowercase())?
-            .iter()
-            .filter_map(|uri| self.documents.get(uri))
-            .filter_map(|entry| {
-                entry
-                    .semantic
-                    .declarations
-                    .iter()
-                    .find(|declaration| {
-                        declaration.kind == DeclarationKind::Script
-                            && declaration.name.eq_ignore_ascii_case(name)
-                    })
-                    .map(|declaration| (entry, declaration))
-            })
-            .collect::<Vec<_>>();
-        let priority = candidates.iter().map(|(entry, _)| entry.priority).min()?;
-        candidates.retain(|(entry, _)| entry.priority == priority);
-        let first_hash = candidates.first()?.0.content_hash;
-        if candidates
-            .iter()
-            .any(|(entry, _)| entry.content_hash != first_hash)
-        {
-            return None;
-        }
-        candidates.sort_by_key(|(entry, _)| navigation_key(entry));
-        Some(candidates.remove(0))
-    }
-
-    fn members_of<'a>(&'a self, script: &'a Declaration) -> Vec<&'a Declaration> {
-        let mut members = Vec::new();
-        let mut visited = HashSet::new();
-        let mut current = Some(script.name.clone());
-        while let Some(name) = current {
-            if !visited.insert(name.to_ascii_lowercase()) {
-                break;
-            }
-            let Some((document, _)) = self.unique_script(&name) else {
-                break;
-            };
-            for declaration in &document.semantic.declarations {
-                if declaration
-                    .owner_script
-                    .as_deref()
-                    .is_some_and(|owner| owner.eq_ignore_ascii_case(&name))
-                    && declaration.container.is_none()
-                    && !matches!(
-                        declaration.kind,
-                        DeclarationKind::Script | DeclarationKind::Parameter
-                    )
-                    && !declaration.is_global
-                    && !members.iter().any(|existing: &&Declaration| {
-                        existing.name.eq_ignore_ascii_case(&declaration.name)
-                    })
-                {
-                    members.push(declaration);
-                }
-            }
-            current = document.semantic.parent_script.clone();
-        }
-        members
-    }
-
-    fn members_of_type<'a>(
-        &'a self,
-        current: &'a IndexedDocument,
-        type_name: &str,
-    ) -> Vec<&'a Declaration> {
-        if let Some((_, script)) = self.unique_script(type_name) {
-            return self.members_of(script);
-        }
-        let Some(structure) = self
-            .resolve_imported(current, type_name)
-            .filter(|declaration| declaration.kind == DeclarationKind::Struct)
-        else {
-            return Vec::new();
-        };
-        let Some((_, document)) = self
-            .declaration_location(structure)
-            .and_then(|(uri, _)| self.documents.get(&uri).map(|document| (uri, document)))
-        else {
-            return Vec::new();
-        };
-        document
-            .semantic
-            .declarations
-            .iter()
-            .filter(|declaration| {
-                declaration
-                    .container
-                    .as_deref()
-                    .is_some_and(|container| container.eq_ignore_ascii_case(&structure.name))
-            })
-            .collect()
-    }
 }
 
 fn is_instance_completion_candidate(declaration: &Declaration) -> bool {
@@ -552,18 +332,6 @@ fn normalized_content_hash(text: &str) -> blake3::Hash {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     blake3::hash(normalized.as_bytes())
-}
-
-fn navigation_key(document: &IndexedDocument) -> (bool, String) {
-    let path = document
-        .path
-        .as_deref()
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| document.semantic.uri.as_str().to_owned());
-    (
-        path.to_ascii_lowercase().contains("/staging/"),
-        path.to_ascii_lowercase(),
-    )
 }
 
 fn deduplicated_completion_items(declarations: Vec<&Declaration>) -> Vec<CompletionItem> {
@@ -596,32 +364,6 @@ fn completion_kind(kind: DeclarationKind) -> CompletionItemKind {
     }
 }
 
-fn unique_named<'a>(declarations: Vec<&'a Declaration>, name: &str) -> Option<&'a Declaration> {
-    let mut matches = declarations
-        .into_iter()
-        .filter(|declaration| declaration.name.eq_ignore_ascii_case(name));
-    let first = matches.next()?;
-    matches.next().is_none().then_some(first)
-}
-
-fn word_at(text: &str, offset: usize) -> Option<String> {
-    let range = word_byte_range(text, offset)?;
-    Some(text[range].to_owned())
-}
-
-fn word_byte_range(text: &str, offset: usize) -> Option<std::ops::Range<usize>> {
-    let bytes = text.as_bytes();
-    let mut start = offset.min(bytes.len());
-    let mut end = start;
-    while start > 0 && is_identifier(bytes[start - 1]) {
-        start -= 1;
-    }
-    while end < bytes.len() && is_identifier(bytes[end]) {
-        end += 1;
-    }
-    (start < end).then_some(start..end)
-}
-
 fn receiver_before_dot(text: &str, offset: usize) -> Option<String> {
     let bytes = text.as_bytes();
     let mut index = offset.min(bytes.len());
@@ -643,15 +385,6 @@ fn receiver_before_dot(text: &str, offset: usize) -> Option<String> {
         index -= 1;
     }
     (index < end).then(|| text[index..end].to_owned())
-}
-
-fn receiver_before_member(text: &str, offset: usize) -> Option<String> {
-    let bytes = text.as_bytes();
-    let mut start = offset.min(bytes.len());
-    while start > 0 && is_identifier(bytes[start - 1]) {
-        start -= 1;
-    }
-    receiver_before_dot(text, start)
 }
 
 fn is_identifier(byte: u8) -> bool {
@@ -757,6 +490,7 @@ mod tests {
             "Actor Target\n",
             "Function Test()\n",
             "  Target.\n",
+            "  Target.BaseMember()\n",
             "EndFunction\n",
         );
         let project_path = root.join("Project.psc");
@@ -771,6 +505,14 @@ mod tests {
         assert!(items.iter().any(|item| item.label == "ActorMember"));
         assert!(items.iter().any(|item| item.label == "BaseMember"));
         assert!(!items.iter().any(|item| item.label == "Project"));
+        let references = index.references(
+            &path_to_file_uri(&root.join("ScriptObject.psc")).unwrap(),
+            Position::new(1, 10),
+            false,
+        );
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].uri, uri);
+        assert_eq!(references[0].range.start.line, 4);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -801,6 +543,89 @@ mod tests {
     }
 
     #[test]
+    fn finds_resolved_references_across_scopes_overlays_and_cached_text() {
+        let root = temp_root("references");
+        let actor_path = root.join("Actor.psc");
+        fs::write(
+            &actor_path,
+            "ScriptName Actor\nFunction Jump()\nEndFunction\n",
+        )
+        .unwrap();
+        let project_path = root.join("Project.psc");
+        let project = concat!(
+            "ScriptName Project\n",
+            "Actor Target\n",
+            "Function Test(Actor Other)\n",
+            "  Target.Jump()\n",
+            "  Other.Jump()\n",
+            "  ; Target.Jump()\n",
+            "  String Evidence = \"Target.Jump()\"\n",
+            "EndFunction\n",
+            "Function Shadow()\n",
+            "  Actor Target\n",
+            "  Target.Jump()\n",
+            "EndFunction\n",
+        );
+        fs::write(&project_path, project).unwrap();
+        let mut index = WorkspaceIndex::new(&WorkspaceConfig {
+            source_roots: vec![root.clone()],
+            ..WorkspaceConfig::default()
+        })
+        .unwrap();
+        let actor_uri = path_to_file_uri(&actor_path).unwrap();
+        let project_uri = path_to_file_uri(&project_path).unwrap();
+
+        let jump_references = index.references(&actor_uri, Position::new(1, 10), false);
+        assert_eq!(jump_references.len(), 3);
+        assert_eq!(
+            jump_references
+                .iter()
+                .map(|location| location.range.start.line)
+                .collect::<Vec<_>>(),
+            [3, 4, 10]
+        );
+        let with_declaration = index.references(&actor_uri, Position::new(1, 10), true);
+        assert_eq!(with_declaration.len(), 4);
+        assert!(with_declaration.iter().any(|location| {
+            location.uri == actor_uri && location.range.start == Position::new(1, 9)
+        }));
+
+        let target_references = index.references(&project_uri, Position::new(1, 7), false);
+        assert_eq!(target_references.len(), 1);
+        assert_eq!(target_references[0].range.start.line, 3);
+        let parameter_references = index.references(&project_uri, Position::new(2, 21), false);
+        assert_eq!(parameter_references.len(), 1);
+        assert_eq!(parameter_references[0].range.start.line, 4);
+
+        for document in index.documents.values_mut() {
+            document.semantic.text.clear();
+        }
+        assert_eq!(
+            index
+                .references(&actor_uri, Position::new(1, 10), false)
+                .len(),
+            3
+        );
+
+        let overlay = project.replace("  Target.Jump()\n", "  Target.Jump()\n  Target.Jump()\n");
+        index.overlay(project_uri.clone(), &overlay);
+        assert_eq!(
+            index
+                .references(&actor_uri, Position::new(1, 10), false)
+                .len(),
+            5
+        );
+        index.close(&project_uri);
+        assert_eq!(
+            index
+                .references(&actor_uri, Position::new(1, 10), false)
+                .len(),
+            3
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn ambiguous_receiver_type_returns_no_member_claims() {
         let root = temp_root("ambiguous");
         fs::create_dir_all(root.join("one")).unwrap();
@@ -818,7 +643,7 @@ mod tests {
         let path = root.join("Project.psc");
         fs::write(
             &path,
-            "ScriptName Project\nActor Target\nFunction Test()\n  Target.\nEndFunction\n",
+            "ScriptName Project\nActor Target\nFunction Test()\n  Target.One()\nEndFunction\n",
         )
         .unwrap();
         let index = WorkspaceIndex::new(&WorkspaceConfig {
@@ -833,6 +658,15 @@ mod tests {
         );
         let global = index.completion(&path_to_file_uri(&path).unwrap(), Position::new(1, 0));
         assert!(!global.iter().any(|item| item.label == "Actor"));
+        assert!(
+            index
+                .references(
+                    &path_to_file_uri(&path).unwrap(),
+                    Position::new(3, 11),
+                    false
+                )
+                .is_empty()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -841,13 +675,17 @@ mod tests {
         let root = temp_root("duplicates");
         fs::create_dir_all(root.join("Papyrus")).unwrap();
         fs::create_dir_all(root.join("Staging")).unwrap();
-        let actor = "ScriptName Actor\nFunction Jump()\nEndFunction\n";
+        let actor = concat!(
+            "ScriptName Actor\n",
+            "Function Jump()\nEndFunction\n",
+            "Function Test()\n  Jump()\nEndFunction\n",
+        );
         fs::write(root.join("Papyrus/Actor.psc"), actor).unwrap();
         fs::write(root.join("Staging/Actor.psc"), actor.replace('\n', "\r\n")).unwrap();
         let project_path = root.join("Project.psc");
         fs::write(
             &project_path,
-            "ScriptName Project\nActor Target\nFunction Test()\n  Target.\nEndFunction\n",
+            "ScriptName Project\nActor Target\nFunction Test()\n  Target.Jump()\nEndFunction\n",
         )
         .unwrap();
         let config = WorkspaceConfig {
@@ -855,11 +693,30 @@ mod tests {
             ..WorkspaceConfig::default()
         };
         let index = WorkspaceIndex::new(&config).unwrap();
-        let items = index.completion(
-            &path_to_file_uri(&project_path).unwrap(),
-            Position::new(3, 9),
-        );
+        let project_uri = path_to_file_uri(&project_path).unwrap();
+        let items = index.completion(&project_uri, Position::new(3, 9));
         assert!(items.iter().any(|item| item.label == "Jump"));
+        let references = index.references(&project_uri, Position::new(3, 10), false);
+        assert_eq!(references.len(), 2);
+        assert!(
+            references
+                .iter()
+                .any(|location| location.uri == project_uri)
+        );
+        assert!(references.iter().any(|location| {
+            location
+                .uri
+                .as_str()
+                .to_ascii_lowercase()
+                .contains("/papyrus/actor.psc")
+        }));
+        assert!(!references.iter().any(|location| {
+            location
+                .uri
+                .as_str()
+                .to_ascii_lowercase()
+                .contains("/staging/actor.psc")
+        }));
 
         fs::write(
             root.join("Staging/Actor.psc"),
@@ -869,10 +726,7 @@ mod tests {
         let index = WorkspaceIndex::new(&config).unwrap();
         assert!(
             index
-                .completion(
-                    &path_to_file_uri(&project_path).unwrap(),
-                    Position::new(3, 9)
-                )
+                .completion(&project_uri, Position::new(3, 9))
                 .is_empty()
         );
         fs::remove_dir_all(root).unwrap();
@@ -897,7 +751,7 @@ mod tests {
             "Import Venworks:Core:Enumerations\n",
             "Function Test(ObjectReference akTerminalRef)\n",
             "  LogSeverity severityTable = new LogSeverity\n",
-            "  severityTable.\n",
+            "  severityTable.Info\n",
             "  LogSystem()\n",
             "  akTerminal\n",
             "EndFunction\n",
@@ -920,6 +774,30 @@ mod tests {
             index.definition(&uri, Position::new(5, 5)).unwrap().uri,
             path_to_file_uri(&module_path).unwrap()
         );
+        let references = index.references(
+            &path_to_file_uri(&module_path).unwrap(),
+            Position::new(4, 10),
+            false,
+        );
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].uri, uri);
+        assert_eq!(references[0].range.start.line, 5);
+        let module_uri = path_to_file_uri(&module_path).unwrap();
+        let module_references = index.references(&module_uri, Position::new(0, 12), false);
+        assert_eq!(module_references.len(), 1);
+        assert_eq!(module_references[0].uri, uri);
+        assert_eq!(module_references[0].range.start.line, 1);
+        let struct_references = index.references(&module_uri, Position::new(1, 8), false);
+        assert_eq!(struct_references.len(), 2);
+        assert!(
+            struct_references
+                .iter()
+                .all(|location| location.uri == uri && location.range.start.line == 3)
+        );
+        let member_references = index.references(&module_uri, Position::new(2, 7), false);
+        assert_eq!(member_references.len(), 1);
+        assert_eq!(member_references[0].uri, uri);
+        assert_eq!(member_references[0].range.start.line, 4);
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -52,6 +52,14 @@ pub(crate) struct Declaration {
     pub(crate) is_global: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct SemanticOccurrence {
+    pub(crate) name: String,
+    pub(crate) receiver: Option<String>,
+    pub(crate) selection_range: Range,
+    pub(crate) byte_offset: usize,
+}
+
 impl Declaration {
     pub(crate) fn signature(&self) -> String {
         match self.kind {
@@ -88,6 +96,7 @@ pub(crate) struct SemanticDocument {
     pub(crate) parent_script: Option<String>,
     pub(crate) imports: Vec<String>,
     pub(crate) declarations: Vec<Declaration>,
+    pub(crate) occurrences: Vec<SemanticOccurrence>,
     #[serde(skip)]
     pub(crate) symbols: Vec<DocumentSymbol>,
 }
@@ -113,6 +122,7 @@ impl SemanticExtractor {
             parent_script: None,
             imports: Vec::new(),
             declarations: Vec::new(),
+            occurrences: Vec::new(),
             symbols: Vec::new(),
         };
         let Some(tree) = self.parser.parse(source, None) else {
@@ -142,8 +152,76 @@ impl SemanticExtractor {
             root.byte_range(),
             &mut document.declarations,
         );
+        collect_occurrences(
+            root,
+            source,
+            &line_index,
+            &document.declarations,
+            &mut document.occurrences,
+        );
         document
     }
+}
+
+fn collect_occurrences(
+    node: Node<'_>,
+    source: &str,
+    index: &LineIndex,
+    declarations: &[Declaration],
+    output: &mut Vec<SemanticOccurrence>,
+) {
+    if matches!(node.kind(), "identifier" | "qualified_identifier") {
+        let selection_range = index.range(source, node.byte_range());
+        if declarations
+            .iter()
+            .any(|declaration| declaration.selection_range == selection_range)
+            || is_named_argument_label(node)
+        {
+            return;
+        }
+        let Some(receiver) = occurrence_receiver(node, source) else {
+            return;
+        };
+        if let Some(name) = text(node, source) {
+            output.push(SemanticOccurrence {
+                name,
+                receiver,
+                selection_range,
+                byte_offset: node.start_byte(),
+            });
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_occurrences(child, source, index, declarations, output);
+    }
+}
+
+fn occurrence_receiver(node: Node<'_>, source: &str) -> Option<Option<String>> {
+    let Some(parent) = node.parent() else {
+        return Some(None);
+    };
+    let is_member = parent
+        .child_by_field_name("member")
+        .is_some_and(|member| member.id() == node.id());
+    if !is_member {
+        return Some(None);
+    }
+    let object = parent.child_by_field_name("object")?;
+    (object.kind() == "identifier")
+        .then(|| text(object, source))
+        .flatten()
+        .map(Some)
+}
+
+fn is_named_argument_label(node: Node<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "argument"
+            && parent
+                .child_by_field_name("name")
+                .is_some_and(|name| name.id() == node.id())
+    })
 }
 
 fn collect(
@@ -367,6 +445,46 @@ mod tests {
                 .declarations
                 .iter()
                 .any(|item| item.name == "LogSystem" && item.is_global)
+        );
+    }
+
+    #[test]
+    fn extracts_semantic_occurrences_without_textual_false_positives() {
+        let source = concat!(
+            "ScriptName Example\n",
+            "Actor Target\n",
+            "Function Test()\n",
+            "  Target.Jump()\n",
+            "  Log(value = Target)\n",
+            "  ; Target.Jump()\n",
+            "  String Evidence = \"Target.Jump()\"\n",
+            "EndFunction\n",
+        );
+        let document = SemanticExtractor::new()
+            .unwrap()
+            .extract(Uri::from_str("file:///Example.psc").unwrap(), source);
+        assert!(document.occurrences.iter().any(|occurrence| {
+            occurrence.name == "Jump" && occurrence.receiver.as_deref() == Some("Target")
+        }));
+        assert_eq!(
+            document
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.name == "Target")
+                .count(),
+            2
+        );
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.name == "value")
+        );
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.name == "Example")
         );
     }
 }

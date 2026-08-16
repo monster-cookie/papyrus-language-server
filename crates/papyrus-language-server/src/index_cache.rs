@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::semantic::SemanticDocument;
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone)]
 pub(crate) struct CachedDocument {
@@ -160,5 +160,5 @@ fn cache_path() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join("papyrus-language-server")
         .join("cache")
-        .join("semantic-index-v3.json")
+        .join(format!("semantic-index-v{SCHEMA_VERSION}.json"))
 }

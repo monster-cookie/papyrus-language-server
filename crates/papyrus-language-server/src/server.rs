@@ -5,7 +5,7 @@ use lsp_types::{
     CompletionParams, CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentSymbolParams,
     DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, HoverParams,
-    InitializeParams, PublishDiagnosticsParams, Uri, WorkspaceSymbolParams,
+    InitializeParams, PublishDiagnosticsParams, ReferenceParams, Uri, WorkspaceSymbolParams,
 };
 
 use crate::{
@@ -61,6 +61,7 @@ pub fn run_connection(connection: &Connection) -> ServerResult<()> {
             "completionProvider": { "triggerCharacters": ["."] },
             "hoverProvider": true,
             "definitionProvider": true,
+            "referencesProvider": true,
             "textDocumentSync": {
                 "openClose": true,
                 "change": 1,
@@ -160,6 +161,15 @@ impl Server {
                         params.text_document_position_params.position,
                     )
                     .map(GotoDefinitionResponse::Scalar);
+                Response::new_ok(request.id, serde_json::to_value(result)?)
+            }
+            "textDocument/references" => {
+                let params: ReferenceParams = deserialize_request(request.params, "references")?;
+                let result = self.workspace.references(
+                    &params.text_document_position.text_document.uri,
+                    params.text_document_position.position,
+                    params.context.include_declaration,
+                );
                 Response::new_ok(request.id, serde_json::to_value(result)?)
             }
             _ => Response::new_err(

@@ -24,10 +24,14 @@ Rust tests verify:
 - instance completion excludes `Const` and conventional `CONST_` members while retaining ordinary `AutoReadOnly` properties;
 - explicitly written constant-style members still resolve for hover and go to definition;
 - hover and go to definition resolve the same source-derived declaration;
+- find references honors declaration inclusion, local scopes, parameters, inherited members, imported globals and structs, and conservative ambiguity handling;
+- reference extraction excludes declaration names, named-argument labels, comments, and strings;
+- unsaved overlays rebuild references, closing restores disk-backed occurrences, and cached occurrences work without retained source text;
+- identical source aliases contribute references only from the canonical navigation copy;
 - Windows extended-length drive and UNC paths normalize before conversion to LSP file URIs;
 - Steam manifest discovery and ZIP cache extraction use synthetic temporary fixtures;
 - generated fragment filters retain reusable quest and perk base scripts;
-- initialize, initialized, shutdown, and exit complete successfully over an in-memory LSP connection.
+- initialize advertises references, and completion, hover, definition, references, initialized, shutdown, and exit complete successfully over an in-memory LSP connection.
 
 ## Downstream Zed acceptance
 

@@ -12,6 +12,9 @@
 - Added conservative ambiguity handling that returns no semantic claim instead of guessing.
 - Filtered constant-style members from instance completion while retaining explicit hover and go to definition.
 - Fixed LSP file URIs produced from Windows extended-length drive and UNC paths.
+- Added conservative, workspace-wide find references with scope, inheritance, import, ambiguity, overlay, and identical-alias handling.
+- Persisted syntax-backed identifier occurrences in semantic cache schema v4 without storing source text.
+- Split semantic navigation and shared resolution from the workspace indexing and completion module.
 
 ## Version 0.1.0 (August 2nd, 2026)
 
