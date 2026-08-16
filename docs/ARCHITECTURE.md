@@ -44,7 +44,7 @@ Workspace indexing and completion remain in `workspace.rs`; shared declaration r
 
 Semantic cache schema v4 persists declarations and identifier occurrence metadata so references work on cache hits without retaining source text. Older cache generations are ignored rather than migrated or deleted.
 
-On Windows with the Starfield dialect selected, Steam metadata locates app `2722710` and `Tools/ContentResources.zip`. Reusable `Scripts/Source` entries are extracted to a fingerprinted `%LOCALAPPDATA%` cache so definitions remain navigable. Generated fragment paths and standard fragment-name prefixes are excluded only from discovered SDK sources.
+On Windows with the Starfield dialect selected, Steam metadata locates app `2722710`. An installed `Data/Scripts/Source` tree is indexed directly when present; otherwise, reusable `Scripts/Source` entries from `Tools/ContentResources.zip` are extracted to a fingerprinted `%LOCALAPPDATA%` cache. The direct and cached sources are alternatives rather than peers, preventing duplicate SDK definitions. Generated fragment paths and standard fragment-name prefixes are excluded only from discovered SDK sources.
 
 Windows extended-length drive and UNC paths are normalized before conversion to LSP file URIs so navigation locations remain consumable by editor clients.
 

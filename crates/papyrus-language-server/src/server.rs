@@ -12,7 +12,7 @@ use crate::{
     cache::materialize_starfield_sources,
     config::{PapyrusDialect, WorkspaceConfig},
     diagnostics::PapyrusAnalyzer,
-    discovery::discover_starfield_archive,
+    discovery::discover_starfield_sources,
     documents::DocumentStore,
     workspace::WorkspaceIndex,
 };
@@ -33,24 +33,32 @@ pub fn run_connection(connection: &Connection) -> ServerResult<()> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let mut config = WorkspaceConfig::from_initialize(&initialize_params);
     if config.dialect == PapyrusDialect::Starfield {
-        if let Some(archive) = discover_starfield_archive() {
-            match materialize_starfield_sources(&archive) {
-                Ok(cache) => {
-                    eprintln!(
-                        "papyrus-language-server: SFCK cache {} (indexed {}, excluded {})",
-                        cache.root.display(),
-                        cache.indexed,
-                        cache.excluded
-                    );
-                    config.add_discovered_import(cache.root);
+        if let Some(sources) = discover_starfield_sources() {
+            if let Some(source_directory) = sources.source_directory {
+                eprintln!(
+                    "papyrus-language-server: using SFCK sources {}",
+                    source_directory.display()
+                );
+                config.add_discovered_import(source_directory);
+            } else if let Some(archive) = sources.archive {
+                match materialize_starfield_sources(&archive) {
+                    Ok(cache) => {
+                        eprintln!(
+                            "papyrus-language-server: SFCK cache {} (indexed {}, excluded {})",
+                            cache.root.display(),
+                            cache.indexed,
+                            cache.excluded
+                        );
+                        config.add_discovered_import(cache.root);
+                    }
+                    Err(error) => eprintln!(
+                        "papyrus-language-server: failed to materialize {}: {error}",
+                        archive.display()
+                    ),
                 }
-                Err(error) => eprintln!(
-                    "papyrus-language-server: failed to materialize {}: {error}",
-                    archive.display()
-                ),
             }
         } else {
-            eprintln!("papyrus-language-server: Starfield Creation Kit source archive not found");
+            eprintln!("papyrus-language-server: Starfield Creation Kit sources not found");
         }
     }
     let initialize_result = serde_json::json!({

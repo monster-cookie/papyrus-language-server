@@ -18,6 +18,7 @@ use crate::{
     index_cache::{CachedDocument, IndexCache},
     line_index::LineIndex,
     semantic::{Declaration, DeclarationKind, SemanticDocument, SemanticExtractor},
+    source_filter::is_generated_source,
 };
 
 pub(crate) struct WorkspaceIndex {
@@ -99,6 +100,15 @@ impl WorkspaceIndex {
 
     fn index_disk_file(&mut self, path: &Path) {
         if !is_papyrus_file(path) {
+            return;
+        }
+        if self
+            .config
+            .discovered_import_directories
+            .iter()
+            .any(|root| path.starts_with(root))
+            && is_generated_source(path)
+        {
             return;
         }
         let Some(uri) = path_to_file_uri(path) else {
@@ -539,6 +549,137 @@ mod tests {
         assert_eq!(hover.range.unwrap().start.line, 3);
         let definition = index.definition(&uri, position).unwrap();
         assert_eq!(definition.uri, path_to_file_uri(&actor_path).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn script_qualified_globals_resolve_from_discovered_sources_and_prefer_projects() {
+        let root = temp_root("script-qualified");
+        let project_root = root.join("project");
+        let sdk_root = root.join("sdk");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::create_dir_all(sdk_root.join("Fragments")).unwrap();
+        let sdk_game_path = sdk_root.join("Game.psc");
+        fs::write(
+            &sdk_game_path,
+            "ScriptName Game Hidden\nActor Function GetPlayer() Native Global\n",
+        )
+        .unwrap();
+        fs::write(sdk_root.join("Fragments/QF_Sdk.psc"), "ScriptName QF_Sdk\n").unwrap();
+        fs::write(
+            project_root.join("QF_Project.psc"),
+            "ScriptName QF_Project\n",
+        )
+        .unwrap();
+        let project_path = project_root.join("Project.psc");
+        let project = "ScriptName Project\nFunction Test()\n  Game.GetPlayer()\nEndFunction\n";
+        fs::write(&project_path, project).unwrap();
+        let mut config = WorkspaceConfig {
+            source_roots: vec![project_root.clone()],
+            ..WorkspaceConfig::default()
+        };
+        config.add_discovered_import(sdk_root.clone());
+        let index = WorkspaceIndex::new(&config).unwrap();
+        let project_uri = path_to_file_uri(&project_path).unwrap();
+        let sdk_game_uri = path_to_file_uri(&sdk_game_path).unwrap();
+
+        assert!(index.unique_script("QF_Sdk").is_none());
+        assert!(index.unique_script("QF_Project").is_some());
+        assert_eq!(
+            index
+                .definition(&project_uri, Position::new(2, 3))
+                .unwrap()
+                .uri,
+            sdk_game_uri
+        );
+        assert_eq!(
+            index
+                .definition(&project_uri, Position::new(2, 9))
+                .unwrap()
+                .uri,
+            sdk_game_uri
+        );
+        assert!(
+            format!(
+                "{:?}",
+                index
+                    .hover(&project_uri, Position::new(2, 9))
+                    .unwrap()
+                    .contents
+            )
+            .contains("GetPlayer")
+        );
+        let references = index.references(&sdk_game_uri, Position::new(1, 16), false);
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].uri, project_uri);
+        assert_eq!(references[0].range.start.line, 2);
+
+        let project_game_path = project_root.join("Game.psc");
+        fs::write(
+            &project_game_path,
+            "ScriptName Game Hidden\n{Project override}\nActor Function GetPlayer() Native Global\n",
+        )
+        .unwrap();
+        let index = WorkspaceIndex::new(&config).unwrap();
+        assert_eq!(
+            index
+                .definition(&project_uri, Position::new(2, 9))
+                .unwrap()
+                .uri,
+            path_to_file_uri(&project_game_path).unwrap()
+        );
+
+        fs::write(
+            &project_path,
+            "ScriptName Project\nGame Game\nFunction Test()\n  Game.GetPlayer()\nEndFunction\n",
+        )
+        .unwrap();
+        let index = WorkspaceIndex::new(&config).unwrap();
+        assert!(
+            index
+                .definition(&project_uri, Position::new(3, 9))
+                .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires PAPYRUS_AUDIT_ROOT to reference locally installed game sources"]
+    fn installed_source_navigation_audit() {
+        let installed_root = std::env::var_os("PAPYRUS_AUDIT_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("PAPYRUS_AUDIT_ROOT must reference an installed source directory");
+        let installed_game_path = installed_root.join("Game.psc");
+        assert!(installed_game_path.is_file());
+        let root = temp_root("installed-navigation");
+        let project_path = root.join("Project.psc");
+        fs::write(
+            &project_path,
+            "ScriptName Project\nFunction Test()\n  Game.GetPlayer()\nEndFunction\n",
+        )
+        .unwrap();
+        let mut config = WorkspaceConfig {
+            source_roots: vec![root.clone()],
+            ..WorkspaceConfig::default()
+        };
+        config.add_discovered_import(installed_root);
+        let index = WorkspaceIndex::new(&config).unwrap();
+        let project_uri = path_to_file_uri(&project_path).unwrap();
+        let installed_game_uri = path_to_file_uri(&installed_game_path).unwrap();
+        assert_eq!(
+            index
+                .definition(&project_uri, Position::new(2, 3))
+                .unwrap()
+                .uri,
+            installed_game_uri
+        );
+        assert_eq!(
+            index
+                .definition(&project_uri, Position::new(2, 9))
+                .unwrap()
+                .uri,
+            installed_game_uri
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

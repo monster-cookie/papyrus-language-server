@@ -150,10 +150,12 @@ impl WorkspaceIndex {
         occurrence: &SemanticOccurrence,
     ) -> Option<&'a Declaration> {
         if let Some(receiver) = &occurrence.receiver {
-            let receiver_declaration =
-                self.resolve_visible_name(current, receiver, occurrence.byte_offset)?;
-            let ty = &receiver_declaration.ty.as_ref()?.name;
-            return unique_named(self.members_of_type(current, ty), &occurrence.name);
+            return self.resolve_qualified_member(
+                current,
+                receiver,
+                &occurrence.name,
+                occurrence.byte_offset,
+            );
         }
         self.resolve_visible_name(current, &occurrence.name, occurrence.byte_offset)
             .or_else(|| {
@@ -174,15 +176,44 @@ impl WorkspaceIndex {
         let offset = LineIndex::new(text).byte_offset(text, position);
         let name = word_at(text, offset)?;
         if let Some(receiver) = receiver_before_member(text, offset) {
-            let receiver_declaration = self.resolve_visible_name(current, &receiver, offset)?;
-            let ty = &receiver_declaration.ty.as_ref()?.name;
-            return unique_named(self.members_of_type(current, ty), &name);
+            return self.resolve_qualified_member(current, &receiver, &name, offset);
         }
         self.resolve_visible_name(current, &name, offset)
             .or_else(|| {
                 self.unique_script(&name)
                     .map(|(_, declaration)| declaration)
             })
+    }
+
+    fn resolve_qualified_member<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        receiver: &str,
+        member: &str,
+        offset: usize,
+    ) -> Option<&'a Declaration> {
+        if let Some(receiver_declaration) = self.resolve_visible_name(current, receiver, offset) {
+            let ty = &receiver_declaration.ty.as_ref()?.name;
+            return unique_named(self.members_of_type(current, ty), member);
+        }
+        let (document, script) = self.unique_script(receiver)?;
+        unique_named(
+            document
+                .semantic
+                .declarations
+                .iter()
+                .filter(|declaration| {
+                    declaration.kind == DeclarationKind::Function
+                        && declaration.is_global
+                        && declaration.container.is_none()
+                        && declaration
+                            .owner_script
+                            .as_deref()
+                            .is_some_and(|owner| owner.eq_ignore_ascii_case(&script.name))
+                })
+                .collect(),
+            member,
+        )
     }
 
     pub(super) fn resolve_visible_name<'a>(

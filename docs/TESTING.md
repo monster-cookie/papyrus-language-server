@@ -24,12 +24,13 @@ Rust tests verify:
 - instance completion excludes `Const` and conventional `CONST_` members while retaining ordinary `AutoReadOnly` properties;
 - explicitly written constant-style members still resolve for hover and go to definition;
 - hover and go to definition resolve the same source-derived declaration;
+- script-qualified global calls resolve their script and global function while preserving variable shadowing and project-source precedence;
 - find references honors declaration inclusion, local scopes, parameters, inherited members, imported globals and structs, and conservative ambiguity handling;
 - reference extraction excludes declaration names, named-argument labels, comments, and strings;
 - unsaved overlays rebuild references, closing restores disk-backed occurrences, and cached occurrences work without retained source text;
 - identical source aliases contribute references only from the canonical navigation copy;
 - Windows extended-length drive and UNC paths normalize before conversion to LSP file URIs;
-- Steam manifest discovery and ZIP cache extraction use synthetic temporary fixtures;
+- Steam manifest discovery, installed-source preference, ZIP cache fallback, and discovered-source filtering use synthetic temporary fixtures;
 - generated fragment filters retain reusable quest and perk base scripts;
 - initialize advertises references, and completion, hover, definition, references, initialized, shutdown, and exit complete successfully over an in-memory LSP connection.
 
@@ -82,4 +83,4 @@ Local recursive audits completed on Windows x64 on 2026-08-01:
 | Skyrim Anniversary Edition | 14,301 | No diagnostics |
 | Fallout 4 extracted source tree | 10,689 | No diagnostics |
 
-The ignored `installed_source_audit` test reads a source root from `PAPYRUS_AUDIT_ROOT`; the path is never stored in the repository. A small number of legacy Skyrim and Fallout 4 files are not valid UTF-8, so the audit decodes input lossily to model the Unicode buffer that an LSP client sends to the server. No installed source content is copied or retained.
+The ignored `installed_source_audit` and `installed_source_navigation_audit` tests read a source root from `PAPYRUS_AUDIT_ROOT`; the path is never stored in the repository. The navigation audit verifies that a script-qualified `Game.GetPlayer()` call resolves both the script and global function to the installed `Game.psc`. A small number of legacy Skyrim and Fallout 4 files are not valid UTF-8, so the diagnostics audit decodes input lossily to model the Unicode buffer that an LSP client sends to the server. No installed source content is copied or retained.

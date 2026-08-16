@@ -51,11 +51,11 @@ Editors may supply settings through `initializationOptions.papyrus`:
 
 `dialect` accepts `auto`, `skyrim`, `fallout4`, or `starfield` and defaults to `auto`. When `sourceRoots` is omitted, the server indexes the file-based LSP workspace folders. Import directories are indexed alongside project roots. The selected dialect controls dialect-specific source discovery; `auto` does not infer a dialect or enable dialect-specific discovery.
 
-When `dialect` is `starfield`, the server also discovers Steam's Starfield Creation Kit installation. It extracts reusable `.psc` files from `Tools/ContentResources.zip` into `%LOCALAPPDATA%\papyrus-language-server\cache`, excluding generated `Fragments` and `QF_`, `PF_`, `TIF_`, and `SF_` scripts. Cached source remains local and provides navigable definitions; project files are never filtered.
+When `dialect` is `starfield`, the server also discovers Steam's Starfield Creation Kit installation. It indexes an installed `Data/Scripts/Source` tree when present; otherwise, it extracts reusable `.psc` files from `Tools/ContentResources.zip` into `%LOCALAPPDATA%\papyrus-language-server\cache`. Automatically discovered sources exclude generated `Fragments` and `QF_`, `PF_`, `TIF_`, and `SF_` scripts. Installed or cached source remains local and provides navigable definitions; project files are never filtered.
 
 IntelliSense is deliberately conservative. Member completion is returned only when the receiver's declared type resolves uniquely, including inherited members. Hover, definition, and references use the same indexed declaration and never synthesize missing types, APIs, or documentation. Find References searches syntax-backed identifiers across the workspace, excludes comments and strings, respects local scopes and source precedence, and returns no claim for ambiguous or unsupported expressions.
 
-Imported scripts contribute their declared structs and `Global` functions to completion, hover, go to definition, and references. Top-level `Const` values and `Global` functions are excluded from instance-member completion.
+Imported scripts contribute their declared structs and `Global` functions to completion, hover, go to definition, and references. Script-qualified global calls such as `Game.GetPlayer()` resolve against the indexed script source. Top-level `Const` values and `Global` functions are excluded from instance-member completion.
 
 ## Semantic index cache
 
