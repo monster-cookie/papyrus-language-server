@@ -22,6 +22,37 @@ pub(super) trait ExpressionContext {
         type_name: &str,
     ) -> Vec<&'a Declaration>;
 
+    fn resolve_visible_name_outcome<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        name: &str,
+        offset: usize,
+    ) -> Resolution<&'a Declaration> {
+        self.resolve_visible_name(current, name, offset)
+            .map_or(Resolution::Unsupported, Resolution::Resolved)
+    }
+
+    fn resolve_script_outcome<'a>(
+        &'a self,
+        name: &str,
+    ) -> Resolution<(&'a IndexedDocument, &'a Declaration)> {
+        self.unique_script(name)
+            .map_or(Resolution::Unsupported, Resolution::Resolved)
+    }
+
+    fn members_of_type_outcome<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        type_name: &str,
+    ) -> Resolution<Vec<&'a Declaration>> {
+        let members = self.members_of_type(current, type_name);
+        if members.is_empty() {
+            Resolution::Unsupported
+        } else {
+            Resolution::Resolved(members)
+        }
+    }
+
     fn declaration_name<'a>(&'a self, declaration: &'a Declaration) -> &'a str {
         &declaration.name
     }
@@ -57,6 +88,55 @@ impl ExpressionContext for WorkspaceIndex {
     ) -> Vec<&'a Declaration> {
         WorkspaceIndex::members_of_type(self, current, type_name)
     }
+
+    fn resolve_visible_name_outcome<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        name: &str,
+        offset: usize,
+    ) -> Resolution<&'a Declaration> {
+        WorkspaceIndex::resolve_visible_name_outcome(self, current, name, offset)
+    }
+
+    fn resolve_script_outcome<'a>(
+        &'a self,
+        name: &str,
+    ) -> Resolution<(&'a IndexedDocument, &'a Declaration)> {
+        WorkspaceIndex::unique_script_outcome(self, name)
+    }
+
+    fn members_of_type_outcome<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        type_name: &str,
+    ) -> Resolution<Vec<&'a Declaration>> {
+        WorkspaceIndex::members_of_type_outcome(self, current, type_name)
+    }
+}
+
+pub(super) enum Resolution<T> {
+    Resolved(T),
+    Missing,
+    Ambiguous,
+    Unsupported,
+}
+
+impl<T> Resolution<T> {
+    pub(super) fn map<U>(self, map: impl FnOnce(T) -> U) -> Resolution<U> {
+        match self {
+            Self::Resolved(value) => Resolution::Resolved(map(value)),
+            Self::Missing => Resolution::Missing,
+            Self::Ambiguous => Resolution::Ambiguous,
+            Self::Unsupported => Resolution::Unsupported,
+        }
+    }
+
+    pub(super) fn into_option(self) -> Option<T> {
+        match self {
+            Self::Resolved(value) => Some(value),
+            Self::Missing | Self::Ambiguous | Self::Unsupported => None,
+        }
+    }
 }
 
 enum ExpressionResolution<'a> {
@@ -71,8 +151,22 @@ pub(super) fn resolve_member_expression<'a>(
     receiver: &SemanticExpression,
     member: &str,
 ) -> Option<&'a Declaration> {
-    let receiver = resolve_expression(context, current, receiver, 0)?;
-    resolve_member_from_resolution(context, current, receiver, member)
+    resolve_member_expression_outcome(context, current, receiver, member).into_option()
+}
+
+pub(super) fn resolve_member_expression_outcome<'a>(
+    context: &'a impl ExpressionContext,
+    current: &'a IndexedDocument,
+    receiver: &SemanticExpression,
+    member: &str,
+) -> Resolution<&'a Declaration> {
+    match resolve_expression(context, current, receiver, 0) {
+        Resolution::Resolved(receiver) => {
+            resolve_member_from_resolution(context, current, receiver, member)
+        }
+        Resolution::Ambiguous => Resolution::Ambiguous,
+        Resolution::Missing | Resolution::Unsupported => Resolution::Unsupported,
+    }
 }
 
 pub(super) fn members_for_expression<'a>(
@@ -81,18 +175,18 @@ pub(super) fn members_for_expression<'a>(
     expression: &SemanticExpression,
 ) -> Vec<&'a Declaration> {
     match resolve_expression(context, current, expression, 0) {
-        Some(ExpressionResolution::Declaration(declaration)) => declaration
+        Resolution::Resolved(ExpressionResolution::Declaration(declaration)) => declaration
             .ty
             .as_ref()
             .and_then(TypeRef::scalar_name)
             .map(|ty| context.members_of_type(current, ty))
             .unwrap_or_default(),
-        Some(ExpressionResolution::Script(_, script)) => context.members_of(script),
-        Some(ExpressionResolution::Value(ty)) => ty
+        Resolution::Resolved(ExpressionResolution::Script(_, script)) => context.members_of(script),
+        Resolution::Resolved(ExpressionResolution::Value(ty)) => ty
             .scalar_name()
             .map(|ty| context.members_of_type(current, ty))
             .unwrap_or_default(),
-        None => Vec::new(),
+        Resolution::Missing | Resolution::Ambiguous | Resolution::Unsupported => Vec::new(),
     }
 }
 
@@ -101,67 +195,116 @@ fn resolve_expression<'a>(
     current: &'a IndexedDocument,
     expression: &SemanticExpression,
     depth: usize,
-) -> Option<ExpressionResolution<'a>> {
+) -> Resolution<ExpressionResolution<'a>> {
     if depth >= MAX_EXPRESSION_DEPTH {
-        return None;
+        return Resolution::Unsupported;
     }
     match expression {
         SemanticExpression::Identifier { name, byte_offset } => {
             if name.eq_ignore_ascii_case("self") {
-                let script_name = current.semantic.script_name.as_deref()?;
+                let Some(script_name) = current.semantic.script_name.as_deref() else {
+                    return Resolution::Unsupported;
+                };
                 let effective_name = context
                     .unique_script(script_name)
                     .map(|(_, script)| context.declaration_name(script))
                     .unwrap_or(script_name);
-                return Some(ExpressionResolution::Value(TypeRef {
+                return Resolution::Resolved(ExpressionResolution::Value(TypeRef {
                     name: effective_name.to_owned(),
                     array: false,
                 }));
             }
-            if let Some(declaration) = context.resolve_visible_name(current, name, *byte_offset) {
-                if declaration.kind == DeclarationKind::Script {
-                    let (document, script) = context.unique_script(&declaration.name)?;
-                    return Some(ExpressionResolution::Script(document, script));
-                }
-                return Some(ExpressionResolution::Declaration(declaration));
+            if name.eq_ignore_ascii_case("parent") {
+                let Some(parent_name) = current.semantic.parent_script.as_deref() else {
+                    return Resolution::Unsupported;
+                };
+                return match context.resolve_script_outcome(parent_name) {
+                    Resolution::Resolved((_, script)) => {
+                        Resolution::Resolved(ExpressionResolution::Value(TypeRef {
+                            name: context.declaration_name(script).to_owned(),
+                            array: false,
+                        }))
+                    }
+                    Resolution::Missing | Resolution::Unsupported => Resolution::Unsupported,
+                    Resolution::Ambiguous => Resolution::Ambiguous,
+                };
             }
-            context
-                .unique_script(name)
-                .map(|(document, script)| ExpressionResolution::Script(document, script))
+            match context.resolve_visible_name_outcome(current, name, *byte_offset) {
+                Resolution::Resolved(declaration) => {
+                    if declaration.kind == DeclarationKind::Script {
+                        return match context.resolve_script_outcome(&declaration.name) {
+                            Resolution::Resolved((document, script)) => {
+                                Resolution::Resolved(ExpressionResolution::Script(document, script))
+                            }
+                            Resolution::Missing => Resolution::Missing,
+                            Resolution::Ambiguous => Resolution::Ambiguous,
+                            Resolution::Unsupported => Resolution::Unsupported,
+                        };
+                    }
+                    Resolution::Resolved(ExpressionResolution::Declaration(declaration))
+                }
+                Resolution::Ambiguous => Resolution::Ambiguous,
+                Resolution::Missing => script_resolution(context, name),
+                Resolution::Unsupported => match script_resolution(context, name) {
+                    Resolution::Resolved(value) => Resolution::Resolved(value),
+                    Resolution::Ambiguous => Resolution::Ambiguous,
+                    Resolution::Missing | Resolution::Unsupported => Resolution::Unsupported,
+                },
+            }
         }
         SemanticExpression::Member {
             object,
             member,
             byte_offset: _,
-        } => {
-            let receiver = resolve_expression(context, current, object, depth + 1)?;
-            resolve_member_from_resolution(context, current, receiver, member)
-                .map(ExpressionResolution::Declaration)
-        }
+        } => match resolve_expression(context, current, object, depth + 1) {
+            Resolution::Resolved(receiver) => {
+                match resolve_member_from_resolution(context, current, receiver, member) {
+                    Resolution::Resolved(declaration) => {
+                        Resolution::Resolved(ExpressionResolution::Declaration(declaration))
+                    }
+                    Resolution::Missing => Resolution::Missing,
+                    Resolution::Ambiguous => Resolution::Ambiguous,
+                    Resolution::Unsupported => Resolution::Unsupported,
+                }
+            }
+            Resolution::Ambiguous => Resolution::Ambiguous,
+            Resolution::Missing | Resolution::Unsupported => Resolution::Unsupported,
+        },
         SemanticExpression::Call { function } => {
-            let ExpressionResolution::Declaration(function) =
-                resolve_expression(context, current, function, depth + 1)?
-            else {
-                return None;
+            let function = match resolve_expression(context, current, function, depth + 1) {
+                Resolution::Resolved(ExpressionResolution::Declaration(function)) => function,
+                Resolution::Resolved(
+                    ExpressionResolution::Script(_, _) | ExpressionResolution::Value(_),
+                )
+                | Resolution::Unsupported => return Resolution::Unsupported,
+                Resolution::Missing => return Resolution::Missing,
+                Resolution::Ambiguous => return Resolution::Ambiguous,
             };
             if !matches!(
                 function.kind,
                 DeclarationKind::Function | DeclarationKind::Event
             ) {
-                return None;
+                return Resolution::Unsupported;
             }
-            function.ty.clone().map(ExpressionResolution::Value)
+            function.ty.clone().map_or(Resolution::Unsupported, |ty| {
+                Resolution::Resolved(ExpressionResolution::Value(ty))
+            })
         }
         SemanticExpression::Subscript { array } => {
-            let mut ty = expression_type(context, current, array, depth + 1)?;
+            let mut ty = match expression_type(context, current, array, depth + 1) {
+                Resolution::Resolved(ty) => ty,
+                Resolution::Missing => return Resolution::Missing,
+                Resolution::Ambiguous => return Resolution::Ambiguous,
+                Resolution::Unsupported => return Resolution::Unsupported,
+            };
             if !ty.array {
-                return None;
+                return Resolution::Unsupported;
             }
             ty.array = false;
-            Some(ExpressionResolution::Value(ty))
+            Resolution::Resolved(ExpressionResolution::Value(ty))
         }
         SemanticExpression::Cast { ty } | SemanticExpression::New { ty } => {
-            Some(ExpressionResolution::Value(ty.clone()))
+            Resolution::Resolved(ExpressionResolution::Value(ty.clone()))
         }
         SemanticExpression::Parenthesized { value } => {
             resolve_expression(context, current, value, depth + 1)
@@ -174,14 +317,22 @@ fn expression_type<'a>(
     current: &'a IndexedDocument,
     expression: &SemanticExpression,
     depth: usize,
-) -> Option<TypeRef> {
-    match resolve_expression(context, current, expression, depth)? {
-        ExpressionResolution::Declaration(declaration) => declaration.ty.clone(),
-        ExpressionResolution::Script(_, script) => Some(TypeRef {
-            name: context.declaration_name(script).to_owned(),
-            array: false,
-        }),
-        ExpressionResolution::Value(ty) => Some(ty),
+) -> Resolution<TypeRef> {
+    match resolve_expression(context, current, expression, depth) {
+        Resolution::Resolved(ExpressionResolution::Declaration(declaration)) => declaration
+            .ty
+            .clone()
+            .map_or(Resolution::Unsupported, Resolution::Resolved),
+        Resolution::Resolved(ExpressionResolution::Script(_, script)) => {
+            Resolution::Resolved(TypeRef {
+                name: context.declaration_name(script).to_owned(),
+                array: false,
+            })
+        }
+        Resolution::Resolved(ExpressionResolution::Value(ty)) => Resolution::Resolved(ty),
+        Resolution::Missing => Resolution::Missing,
+        Resolution::Ambiguous => Resolution::Ambiguous,
+        Resolution::Unsupported => Resolution::Unsupported,
     }
 }
 
@@ -190,17 +341,21 @@ fn resolve_member_from_resolution<'a>(
     current: &'a IndexedDocument,
     receiver: ExpressionResolution<'a>,
     member: &str,
-) -> Option<&'a Declaration> {
+) -> Resolution<&'a Declaration> {
     match receiver {
         ExpressionResolution::Declaration(declaration) => {
-            let ty = declaration.ty.as_ref()?.scalar_name()?;
-            unique_named(context.members_of_type(current, ty), member, context)
+            let Some(ty) = declaration.ty.as_ref().and_then(TypeRef::scalar_name) else {
+                return Resolution::Unsupported;
+            };
+            resolve_named_type_member(context, current, ty, member)
         }
         ExpressionResolution::Value(ty) => {
-            let ty = ty.scalar_name()?;
-            unique_named(context.members_of_type(current, ty), member, context)
+            let Some(ty) = ty.scalar_name() else {
+                return Resolution::Unsupported;
+            };
+            resolve_named_type_member(context, current, ty, member)
         }
-        ExpressionResolution::Script(document, script) => unique_named(
+        ExpressionResolution::Script(document, script) => unique_named_outcome(
             document
                 .semantic
                 .declarations
@@ -221,16 +376,49 @@ fn resolve_member_from_resolution<'a>(
     }
 }
 
-fn unique_named<'a>(
+fn resolve_named_type_member<'a>(
+    context: &'a impl ExpressionContext,
+    current: &'a IndexedDocument,
+    type_name: &str,
+    member: &str,
+) -> Resolution<&'a Declaration> {
+    match context.members_of_type_outcome(current, type_name) {
+        Resolution::Resolved(declarations) => unique_named_outcome(declarations, member, context),
+        Resolution::Ambiguous => Resolution::Ambiguous,
+        Resolution::Missing | Resolution::Unsupported => Resolution::Unsupported,
+    }
+}
+
+fn script_resolution<'a>(
+    context: &'a impl ExpressionContext,
+    name: &str,
+) -> Resolution<ExpressionResolution<'a>> {
+    match context.resolve_script_outcome(name) {
+        Resolution::Resolved((document, script)) => {
+            Resolution::Resolved(ExpressionResolution::Script(document, script))
+        }
+        Resolution::Missing => Resolution::Missing,
+        Resolution::Ambiguous => Resolution::Ambiguous,
+        Resolution::Unsupported => Resolution::Unsupported,
+    }
+}
+
+fn unique_named_outcome<'a>(
     declarations: Vec<&'a Declaration>,
     name: &str,
     context: &'a impl ExpressionContext,
-) -> Option<&'a Declaration> {
+) -> Resolution<&'a Declaration> {
     let mut matches = declarations
         .into_iter()
         .filter(|declaration| context.name_matches(declaration, name));
-    let first = matches.next()?;
-    matches.next().is_none().then_some(first)
+    let Some(first) = matches.next() else {
+        return Resolution::Missing;
+    };
+    if matches.next().is_some() {
+        Resolution::Ambiguous
+    } else {
+        Resolution::Resolved(first)
+    }
 }
 
 #[cfg(test)]

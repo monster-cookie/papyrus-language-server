@@ -30,6 +30,7 @@ impl TypeRef {
 pub(crate) struct Parameter {
     pub(crate) name: String,
     pub(crate) ty: TypeRef,
+    pub(crate) has_default: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -61,12 +62,22 @@ pub(crate) struct Declaration {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) enum SemanticOccurrenceKind {
+    Reference,
+    Type,
+    Import,
+    Member,
+    NamedArgument,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct SemanticOccurrence {
     pub(crate) name: String,
     pub(crate) receiver: Option<SemanticExpression>,
     pub(crate) selection_range: Range,
     pub(crate) byte_offset: usize,
     pub(crate) is_named_argument_label: bool,
+    pub(crate) kind: SemanticOccurrenceKind,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -75,11 +86,14 @@ pub(crate) struct SemanticCallSite {
     argument_range: ByteRange<usize>,
     separators: Vec<usize>,
     arguments: Vec<SemanticCallArgument>,
+    complete: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct SemanticCallArgument {
-    name: Option<String>,
+pub(crate) struct SemanticCallArgument {
+    pub(crate) name: Option<String>,
+    pub(crate) range: Range,
+    pub(crate) name_range: Option<Range>,
     byte_range: ByteRange<usize>,
 }
 
@@ -107,6 +121,14 @@ impl SemanticCallSite {
         self.argument_range
             .end
             .saturating_sub(self.argument_range.start)
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    pub(crate) fn arguments(&self) -> &[SemanticCallArgument] {
+        &self.arguments
     }
 }
 
@@ -339,9 +361,14 @@ fn call_site_from_children(
                 && argument_start <= child.start_byte()
                 && child.end_byte() <= argument_end
         })
-        .map(|argument| SemanticCallArgument {
-            name: field_text(*argument, "name", source),
-            byte_range: argument.byte_range(),
+        .map(|argument| {
+            let name_node = argument.child_by_field_name("name");
+            SemanticCallArgument {
+                name: name_node.and_then(|name| text(name, source)),
+                range: index.range(source, argument.byte_range()),
+                name_range: name_node.map(|name| index.range(source, name.byte_range())),
+                byte_range: argument.byte_range(),
+            }
         })
         .collect();
     Some(SemanticCallSite {
@@ -349,6 +376,7 @@ fn call_site_from_children(
         argument_range: argument_start..argument_end,
         separators,
         arguments,
+        complete: close.is_some(),
     })
 }
 
@@ -380,7 +408,8 @@ fn collect_occurrences(
         {
             return;
         }
-        let is_named_argument_label = is_named_argument_label(node);
+        let kind = occurrence_kind(node);
+        let is_named_argument_label = kind == SemanticOccurrenceKind::NamedArgument;
         let Some(receiver) = occurrence_receiver(node, source) else {
             return;
         };
@@ -391,6 +420,7 @@ fn collect_occurrences(
                 selection_range,
                 byte_offset: node.start_byte(),
                 is_named_argument_label,
+                kind,
             });
         }
         return;
@@ -433,6 +463,61 @@ fn is_named_argument_label(node: Node<'_>) -> bool {
                 .child_by_field_name("name")
                 .is_some_and(|name| name.id() == node.id())
     })
+}
+
+fn occurrence_kind(node: Node<'_>) -> SemanticOccurrenceKind {
+    if is_named_argument_label(node) {
+        return SemanticOccurrenceKind::NamedArgument;
+    }
+    if node.parent().is_some_and(|parent| {
+        parent
+            .child_by_field_name("member")
+            .is_some_and(|member| member.id() == node.id())
+    }) {
+        return SemanticOccurrenceKind::Member;
+    }
+    if is_import_occurrence(node) {
+        return SemanticOccurrenceKind::Import;
+    }
+    if is_type_occurrence(node) {
+        return SemanticOccurrenceKind::Type;
+    }
+    SemanticOccurrenceKind::Reference
+}
+
+fn is_import_occurrence(node: Node<'_>) -> bool {
+    let value = node;
+    let Some(parent) = value.parent() else {
+        return false;
+    };
+    parent.kind() == "import_declaration"
+        && parent
+            .child_by_field_name("module")
+            .is_some_and(|module| module.id() == value.id())
+}
+
+fn is_type_occurrence(node: Node<'_>) -> bool {
+    let mut value = node;
+    while let Some(parent) = value.parent() {
+        if parent.kind() == "type" {
+            return true;
+        }
+        if matches!(
+            parent.kind(),
+            "script_declaration" | "import_declaration" | "new_expression"
+        ) && ["parent", "module", "type"].iter().any(|field| {
+            parent
+                .child_by_field_name(field)
+                .is_some_and(|field_node| field_node.id() == value.id())
+        }) {
+            return true;
+        }
+        if parent.kind() != "qualified_identifier" {
+            return false;
+        }
+        value = parent;
+    }
+    false
 }
 
 fn collect(
@@ -531,6 +616,7 @@ fn declaration(
                         ty: child
                             .child_by_field_name("type")
                             .and_then(|ty| type_ref(ty, source))?,
+                        has_default: child.child_by_field_name("default").is_some(),
                     })
                 })
                 .collect()
@@ -593,7 +679,7 @@ mod tests {
 
     use lsp_types::Uri;
 
-    use super::{DeclarationKind, SemanticExpression, SemanticExtractor};
+    use super::{DeclarationKind, SemanticExpression, SemanticExtractor, SemanticOccurrenceKind};
 
     #[test]
     fn extracts_parent_types_signatures_scopes_and_documentation() {
@@ -601,7 +687,7 @@ mod tests {
             "ScriptName Child Extends Parent\n",
             "{Count docs}\n",
             "Int Property Count Auto\n",
-            "Actor Function Resolve(ObjectReference Target)\n",
+            "Actor Function Resolve(ObjectReference Target, String Label = \"\")\n",
             "  Actor LocalActor\n",
             "EndFunction\n",
         );
@@ -623,6 +709,8 @@ mod tests {
             .unwrap();
         assert_eq!(function.kind, DeclarationKind::Function);
         assert_eq!(function.parameters[0].ty.name, "ObjectReference");
+        assert!(!function.parameters[0].has_default);
+        assert!(function.parameters[1].has_default);
         assert!(
             document
                 .declarations
@@ -676,6 +764,7 @@ mod tests {
             .extract(Uri::from_str("file:///Example.psc").unwrap(), source);
         assert!(document.occurrences.iter().any(|occurrence| {
             occurrence.name == "Jump"
+                && occurrence.kind == SemanticOccurrenceKind::Member
                 && matches!(
                     occurrence.receiver.as_ref(),
                     Some(SemanticExpression::Identifier { name, .. }) if name == "Target"
@@ -701,8 +790,13 @@ mod tests {
             document
                 .occurrences
                 .iter()
-                .any(|occurrence| occurrence.name == "value" && occurrence.is_named_argument_label)
+                .any(|occurrence| occurrence.name == "value"
+                    && occurrence.kind == SemanticOccurrenceKind::NamedArgument
+                    && occurrence.is_named_argument_label)
         );
+        assert!(document.occurrences.iter().any(|occurrence| {
+            occurrence.name == "Actor" && occurrence.kind == SemanticOccurrenceKind::Type
+        }));
         assert!(
             !document
                 .occurrences
@@ -765,6 +859,7 @@ mod tests {
             .unwrap();
         let last = source.find("Last").unwrap() + 1;
         assert_eq!(outer.argument_at(last), Some((2, None)));
+        assert!(outer.is_complete());
 
         let inner = document
             .call_sites
@@ -794,5 +889,6 @@ mod tests {
         let call = document.call_sites.first().unwrap();
         let offset = source.find("First,").unwrap() + "First,".len();
         assert_eq!(call.argument_at(offset), Some((1, None)));
+        assert!(!call.is_complete());
     }
 }

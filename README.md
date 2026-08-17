@@ -2,7 +2,7 @@
 
 An editor-neutral language server and canonical Tree-sitter grammar for Bethesda's Papyrus scripting language.
 
-The project targets the Papyrus dialects used by Skyrim Anniversary Edition, Fallout 4, and Starfield. It provides native syntax diagnostics, source-derived completion, hover, go to definition, find references, rename, signature help, document symbols, and a workspace symbol index.
+The project targets the Papyrus dialects used by Skyrim Anniversary Edition, Fallout 4, and Starfield. It provides native syntax and conservative semantic diagnostics, source-derived completion, hover, go to definition, find references, rename, signature help, document symbols, and a workspace symbol index.
 
 No Bethesda compiler, flags file, or game source is distributed by this repository. The committed fixtures are original synthetic examples.
 
@@ -55,9 +55,11 @@ Editors may supply settings through `initializationOptions.papyrus`:
 
 When `dialect` is `starfield`, the server also discovers Steam's Starfield Creation Kit installation. It indexes an installed `Data/Scripts/Source` tree when present; otherwise, it extracts reusable `.psc` files from `Tools/ContentResources.zip` into the platform's private per-user cache. Automatically discovered sources exclude generated `Fragments` and `QF_`, `PF_`, `TIF_`, and `SF_` scripts. Installed or cached source remains local and provides navigable definitions; project files are never filtered.
 
-Initialization completes before source discovery, archive extraction, or recursive indexing begins. Those operations run on a cancellable background worker with file-count, depth, individual-file, total-byte, archive-entry, and extraction-byte limits. Clients that advertise LSP work-done progress receive indexing status. Requests that require the complete workspace index wait for the worker; open-buffer diagnostics and document symbols remain available while it runs. When the completed index is published, current open-buffer overlays and disk changes observed during indexing are replayed before it becomes visible.
+Initialization completes before source discovery, archive extraction, or recursive indexing begins. Those operations run on a cancellable background worker with file-count, depth, individual-file, total-byte, archive-entry, and extraction-byte limits. Clients that advertise LSP work-done progress receive indexing status. Requests that require the complete workspace index wait for the worker; syntax diagnostics and document symbols remain available for open buffers while it runs. When the completed index is published, current open-buffer overlays and disk changes observed during indexing are replayed before semantic diagnostics become available.
 
 IntelliSense is deliberately conservative. Member completion is returned only when the receiver's declared type resolves uniquely, including inherited members. Hover, definition, references, rename, and signature help use the same indexed declaration and never synthesize missing types, APIs, or documentation. Find References searches syntax-backed identifiers across the workspace, excludes comments and strings, respects local scopes and source precedence, and returns no claim for ambiguous or unsupported expressions. Rename reuses those resolved locations, validates Papyrus identifiers and case-insensitive collisions, and edits project source roots only; configured imports and discovered SDK sources remain read-only. Signature help tracks positional and named arguments, including incomplete and nested calls, and suppresses unresolved or ambiguous callees.
+
+Semantic diagnostics reuse that resolution layer for open documents. They report definite unresolved references and types, missing members on uniquely resolved receivers with complete inheritance, invalid call targets, unknown or duplicate named arguments, excess arguments, and missing required arguments. Syntax-invalid documents, incomplete calls, unresolved receiver chains, ambiguous definitions, dynamic or unsupported expressions, and incomplete inheritance deliberately produce no semantic cascade. Defaulted parameters are optional. Changes to any open overlay revalidate every open document because one buffer can supply declarations used by another.
 
 Renaming a project script updates its declaration and resolved references and, when the editor advertises LSP rename-file support, renames the matching `.psc` file in the same directory. The namespace prefix must remain unchanged, the current filename must match the script's terminal name, and the destination must not already exist. Case-only filename changes are supported. Namespace-directory moves are deliberately not inferred. Before returning any rename, the server builds a post-edit semantic view and verifies that every edited reference still resolves uniquely to the renamed declaration. Versioned workspace edits carry the current version of each open document.
 
@@ -67,7 +69,7 @@ Imported scripts contribute their declared structs and `Global` functions to com
 
 The server fingerprints normalized source text with BLAKE3. Scripts with the same case-insensitive script name and content fingerprint share one semantic identity even when projects contain identical `Papyrus` and `Staging` copies. A same-name script with different contents remains ambiguous; the server does not silently choose one implementation.
 
-Parsed declarations, call sites, expression receivers, and syntax-backed identifier occurrences are persisted in immutable schema-v7 generations under the platform cache directory:
+Parsed declarations, parameter-default metadata, complete call and argument ranges, expression receivers, and role-classified syntax-backed identifier occurrences are persisted in immutable schema-v8 generations under the platform cache directory:
 
 - Windows: `%LOCALAPPDATA%\papyrus-language-server\cache`
 - Linux: `${XDG_CACHE_HOME:-$HOME/.cache}/papyrus-language-server/cache`

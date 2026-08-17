@@ -11,6 +11,7 @@ mod inference;
 mod navigation;
 mod rename;
 mod scanning;
+mod validation;
 
 use lsp_types::{
     CompletionItem, CompletionItemKind, DocumentSymbol, Documentation, Location, Position,

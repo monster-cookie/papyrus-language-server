@@ -2,15 +2,14 @@
 
 ## Semantic-navigation milestone
 
-The server provides syntax diagnostics, semantic completion, hover, definition, references, rename, signature help, and document/workspace symbols. It does not yet provide:
+The server provides syntax and conservative reference/call diagnostics, semantic completion, hover, definition, references, rename, signature help, and document/workspace symbols. It does not yet provide:
 
-- full expression type inference;
-- semantic type checking;
+- assignment, return, operator, or control-flow type checking;
 - compiler discovery or automatic compilation;
 - formatting;
 - debugging.
 
-These features are planned as later milestones. Debugging requires a separate Debug Adapter Protocol design and runtime transport.
+Semantic diagnostics intentionally remain silent for ambiguous definitions, unresolved receiver chains, incomplete inheritance, unsupported expression shapes, incomplete calls, and files with syntax diagnostics. These safeguards avoid claims that require compiler flags or unavailable SDK sources. Broader type checking is planned as a later milestone. Debugging requires a separate Debug Adapter Protocol design and runtime transport.
 
 ## Diagnostic locations
 
@@ -18,7 +17,7 @@ For a missing closing keyword, the server reports the conflicting closer or the 
 
 ## Workspace scope
 
-The index scans configured source roots and import directories on a bounded background worker and overlays open buffers. The active index is held in memory, and parsed declarations, call sites, and identifier occurrences are restored from a private per-user cache only when source metadata and the current content fingerprint match. Requests requiring the complete workspace index wait for initial indexing; diagnostics and document symbols remain available for open buffers. `auto` does not infer a game dialect. Starfield SDK discovery requires an installed Steam Creation Kit and an explicit `starfield` dialect. Unsupported or ambiguous expressions intentionally produce no IntelliSense or reference result.
+The index scans configured source roots and import directories on a bounded background worker and overlays open buffers. The active index is held in memory, and parsed declarations, call sites, and identifier occurrences are restored from a private per-user cache only when source metadata and the current content fingerprint match. Requests requiring the complete workspace index wait for initial indexing; syntax diagnostics and document symbols remain available for open buffers during indexing, while semantic diagnostics begin after a successful index. `auto` does not infer a game dialect. Starfield SDK discovery requires an installed Steam Creation Kit and an explicit `starfield` dialect. Unsupported or ambiguous expressions intentionally produce no IntelliSense, reference, or semantic-diagnostic claim.
 
 Rename edits declarations and resolved occurrences in project source roots only. Configured imports and discovered SDK sources are read-only. Script rename can rename the matching `.psc` file when the client supports LSP rename-file operations, but the namespace prefix cannot change and namespace-directory moves are not inferred.
 
