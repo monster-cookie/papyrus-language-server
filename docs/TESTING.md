@@ -39,6 +39,12 @@ Rust tests verify:
 - generated fragment filters retain reusable quest and perk base scripts;
 - initialize advertises completion, hover, definition, references, rename with prepare support, and signature help; those requests plus initialized, shutdown, and exit complete successfully over an in-memory LSP connection;
 - the in-memory LSP connection returns multi-document rename edits and a script `RenameFile` operation when the client advertises the required workspace-edit capabilities.
+- initialization responds before background indexing, work-done progress begins only after LSP initialization, queued semantic requests observe the completed index, and open overlays are replayed during publication;
+- invalid request parameters return `InvalidParams`, and malformed notifications do not terminate the session;
+- semantic-cache hits verify current content, retain signature call sites without source text, publish immutable generations, and preserve unrelated cache files;
+- rename rejects edits that would rebind a reference, carries open-document versions, and emits case-preserving destinations for case-only script renames;
+- deleted backing files do not reappear when an overlay closes, discovered-root ancestors named `Fragments` do not filter the entire root, and non-ASCII filenames do not panic the generated-source filter;
+- Starfield archive caches are content-addressed and atomically published with bounded extraction.
 
 ## Downstream Zed acceptance
 
@@ -69,13 +75,14 @@ npm run grammar:test:native
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
+cargo audit
 ```
 
 Successful grammar generation is not evidence that the Rust server compiled. Successful Rust compilation is not evidence that Zed downloaded or launched a release. Each layer is validated independently.
 
 ## Continuous integration
 
-Pull requests targeting `master` and pushes to `master` run the grammar and Rust validation suite on Ubuntu. Tag pushes matching `v*.*.*` build native Windows x64, Linux x64, macOS Intel, and macOS ARM64 archives. The release workflow publishes SHA-256 files beside every archive.
+Pull requests targeting `master` and pushes to `master` run grammar validation on Ubuntu, Rust lint and tests on Windows, Linux, and macOS, and a pinned RustSec audit on Ubuntu. Tag pushes matching `v*.*.*` build native Windows x64, Linux x64, macOS Intel, and macOS ARM64 archives. The release workflow publishes SHA-256 files beside every archive.
 
 Installed game-source audits remain local release checks. Their source files must not be copied into the repository or CI artifacts.
 

@@ -83,14 +83,44 @@ fn deduplicate(paths: &mut Vec<PathBuf>) {
 }
 
 pub(crate) fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
-    let encoded = uri.strip_prefix("file://")?;
-    let decoded = percent_decode(encoded)?;
+    let (scheme, remainder) = uri.split_once(':')?;
+    if !scheme.eq_ignore_ascii_case("file") || remainder.contains(['?', '#']) {
+        return None;
+    }
+    let (authority, encoded_path) = if let Some(without_prefix) = remainder.strip_prefix("//") {
+        without_prefix
+            .split_once('/')
+            .map(|(authority, path)| (authority, format!("/{path}")))
+            .unwrap_or((without_prefix, String::new()))
+    } else {
+        ("", remainder.to_owned())
+    };
+    let authority = percent_decode(authority)?;
+    let authority = (!authority.eq_ignore_ascii_case("localhost"))
+        .then_some(authority)
+        .filter(|authority| !authority.is_empty());
+    let decoded = percent_decode(&encoded_path)?;
     #[cfg(windows)]
-    let decoded = decoded
-        .strip_prefix('/')
-        .unwrap_or(&decoded)
-        .replace('/', "\\");
-    Some(PathBuf::from(decoded))
+    {
+        if let Some(authority) = authority {
+            let path = decoded.trim_start_matches('/').replace('/', "\\");
+            return Some(PathBuf::from(format!(r"\\{authority}\{path}")));
+        }
+        let mut path = decoded.replace('/', "\\");
+        if path.as_bytes().first() == Some(&b'\\') && path.as_bytes().get(2) == Some(&b':') {
+            path.remove(0);
+        }
+        std::path::Path::new(&path)
+            .is_absolute()
+            .then_some(PathBuf::from(path))
+    }
+    #[cfg(not(windows))]
+    {
+        if authority.is_some() || !decoded.starts_with('/') {
+            return None;
+        }
+        Some(PathBuf::from(decoded))
+    }
 }
 
 fn percent_decode(value: &str) -> Option<String> {
@@ -114,7 +144,7 @@ fn percent_decode(value: &str) -> Option<String> {
 mod tests {
     use lsp_types::InitializeParams;
 
-    use super::{PapyrusDialect, WorkspaceConfig};
+    use super::{PapyrusDialect, WorkspaceConfig, file_uri_to_path};
 
     #[test]
     fn parses_all_dialects_and_defaults_invalid_options() {
@@ -150,13 +180,53 @@ mod tests {
             WorkspaceConfig::default()
         );
 
+        #[cfg(windows)]
+        let workspace_uri = "file:///C:/workspace/My%20Mod";
+        #[cfg(not(windows))]
+        let workspace_uri = "file:///workspace/My%20Mod";
         let workspace: InitializeParams = serde_json::from_value(serde_json::json!({
             "capabilities": {},
-            "workspaceFolders": [{ "uri": "file:///workspace/My%20Mod", "name": "My Mod" }]
+            "workspaceFolders": [{ "uri": workspace_uri, "name": "My Mod" }]
         }))
         .unwrap();
         let config = WorkspaceConfig::from_initialize(&workspace);
         assert_eq!(config.source_roots.len(), 1);
         assert!(config.source_roots[0].to_string_lossy().contains("My Mod"));
+    }
+
+    #[test]
+    fn rejects_non_file_relative_and_decorated_uris() {
+        assert!(file_uri_to_path("https://example.com/Script.psc").is_none());
+        assert!(file_uri_to_path("file:relative/Script.psc").is_none());
+        assert!(file_uri_to_path("file:///Script.psc?query").is_none());
+        assert!(file_uri_to_path("file:///Script.psc#fragment").is_none());
+        assert!(file_uri_to_path("file:///Bad%2").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn converts_local_and_unc_windows_file_uris() {
+        assert_eq!(
+            file_uri_to_path("file:///C:/Projects/My%20Mod/Script.psc").unwrap(),
+            std::path::PathBuf::from(r"C:\Projects\My Mod\Script.psc")
+        );
+        assert_eq!(
+            file_uri_to_path("file://server/share/Script.psc").unwrap(),
+            std::path::PathBuf::from(r"\\server\share\Script.psc")
+        );
+        assert_eq!(
+            file_uri_to_path("file://localhost/C:/Projects/Script.psc").unwrap(),
+            std::path::PathBuf::from(r"C:\Projects\Script.psc")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn accepts_local_and_rejects_remote_unix_file_uris() {
+        assert_eq!(
+            file_uri_to_path("file:///workspace/My%20Mod/Script.psc").unwrap(),
+            std::path::PathBuf::from("/workspace/My Mod/Script.psc")
+        );
+        assert!(file_uri_to_path("file://server/share/Script.psc").is_none());
     }
 }

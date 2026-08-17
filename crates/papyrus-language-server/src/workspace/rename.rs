@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use lsp_types::{
     DocumentChangeOperation, DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier,
@@ -6,9 +6,9 @@ use lsp_types::{
     WorkspaceEdit,
 };
 
-use crate::semantic::{Declaration, DeclarationKind};
+use crate::semantic::{Declaration, DeclarationKind, SemanticOccurrence};
 
-use super::{IndexedDocument, WorkspaceIndex, path_to_file_uri};
+use super::{IndexedDocument, WorkspaceIndex, path_to_file_uri, path_to_file_uri_lexical};
 
 const PAPYRUS_KEYWORDS: &[&str] = &[
     "as",
@@ -98,6 +98,7 @@ impl WorkspaceIndex {
     }
 
     // WorkspaceEdit's legacy `changes` fallback requires HashMap<Uri, _>; URI cache state is not mutated.
+    #[cfg(test)]
     #[allow(clippy::mutable_key_type)]
     pub(crate) fn rename(
         &self,
@@ -106,6 +107,27 @@ impl WorkspaceIndex {
         new_name: &str,
         supports_document_changes: bool,
         supports_file_rename: bool,
+    ) -> Result<Option<WorkspaceEdit>, String> {
+        self.rename_with_versions(
+            uri,
+            position,
+            new_name,
+            supports_document_changes,
+            supports_file_rename,
+            &[],
+        )
+    }
+
+    // WorkspaceEdit's legacy `changes` fallback requires HashMap<Uri, _>; URI cache state is not mutated.
+    #[allow(clippy::mutable_key_type)]
+    pub(crate) fn rename_with_versions(
+        &self,
+        uri: &Uri,
+        position: Position,
+        new_name: &str,
+        supports_document_changes: bool,
+        supports_file_rename: bool,
+        document_versions: &[(Uri, i32)],
     ) -> Result<Option<WorkspaceEdit>, String> {
         let declaration = self
             .resolve_at(uri, position)
@@ -148,6 +170,7 @@ impl WorkspaceIndex {
         if changes.is_empty() {
             return Ok(None);
         }
+        self.validate_renamed_references(target_document, declaration, new_name, &changes)?;
         if file_rename.is_none() && !supports_document_changes {
             return Ok(Some(WorkspaceEdit::new(changes)));
         }
@@ -157,8 +180,11 @@ impl WorkspaceIndex {
         let mut operations = documents
             .into_iter()
             .map(|(uri, edits)| {
+                let version = document_versions
+                    .iter()
+                    .find_map(|(candidate, version)| (candidate == &uri).then_some(*version));
                 DocumentChangeOperation::Edit(TextDocumentEdit {
-                    text_document: OptionalVersionedTextDocumentIdentifier { uri, version: None },
+                    text_document: OptionalVersionedTextDocumentIdentifier { uri, version },
                     edits: edits.into_iter().map(OneOf::Left).collect(),
                 })
             })
@@ -171,6 +197,63 @@ impl WorkspaceIndex {
             document_changes: Some(DocumentChanges::Operations(operations)),
             change_annotations: None,
         }))
+    }
+
+    #[allow(clippy::mutable_key_type)]
+    fn validate_renamed_references(
+        &self,
+        target_document: &IndexedDocument,
+        target: &Declaration,
+        new_name: &str,
+        changes: &HashMap<Uri, Vec<TextEdit>>,
+    ) -> Result<(), String> {
+        let resolver = RenamedResolver {
+            workspace: self,
+            target_document,
+            target,
+            new_name,
+        };
+        let (target_uri, target_range) = self
+            .declaration_location(target)
+            .ok_or_else(|| "The rename target location is no longer indexed.".to_owned())?;
+        let mut found_target = false;
+        for (uri, edits) in changes {
+            let document = self.documents.get(uri).ok_or_else(|| {
+                format!("The rename source `{}` is no longer indexed.", uri.as_str())
+            })?;
+            for edit in edits {
+                if uri == &target_uri && edit.range == target_range {
+                    found_target = true;
+                    continue;
+                }
+                let occurrence = document
+                    .semantic
+                    .occurrences
+                    .iter()
+                    .find(|occurrence| occurrence.selection_range == edit.range)
+                    .ok_or_else(|| {
+                        format!(
+                            "The edited reference in `{}` is no longer indexed.",
+                            uri.as_str()
+                        )
+                    })?;
+                let Some(resolved) = resolver.resolve_occurrence(document, occurrence) else {
+                    return Err(format!(
+                        "Renaming to `{new_name}` would make a reference in `{}` ambiguous or unresolved.",
+                        uri.as_str()
+                    ));
+                };
+                if !std::ptr::eq(self.canonical_declaration(resolved), target) {
+                    return Err(format!(
+                        "Renaming to `{new_name}` would change what a reference in `{}` resolves to.",
+                        uri.as_str()
+                    ));
+                }
+            }
+        }
+        found_target
+            .then_some(())
+            .ok_or_else(|| "The rename target was not included in the edit set.".to_owned())
     }
 
     fn rename_target_document(&self, declaration: &Declaration) -> Option<&IndexedDocument> {
@@ -270,11 +353,12 @@ impl WorkspaceIndex {
                 old_path.display()
             ));
         }
-        if old_leaf.eq_ignore_ascii_case(new_leaf) {
+        if old_leaf == new_leaf {
             return Ok(None);
         }
         let new_path = old_path.with_file_name(format!("{new_leaf}.psc"));
-        if new_path.exists() {
+        let case_only = old_leaf.eq_ignore_ascii_case(new_leaf);
+        if new_path.exists() && !case_only {
             return Err(format!(
                 "Cannot rename the script because `{}` already exists.",
                 new_path.display()
@@ -283,7 +367,7 @@ impl WorkspaceIndex {
         let old_uri = path_to_file_uri(old_path).ok_or_else(|| {
             "The current script path cannot be represented as a file URI.".to_owned()
         })?;
-        let new_uri = path_to_file_uri(&new_path).ok_or_else(|| {
+        let new_uri = path_to_file_uri_lexical(&new_path).ok_or_else(|| {
             "The renamed script path cannot be represented as a file URI.".to_owned()
         })?;
         Ok(Some(RenameFile {
@@ -293,6 +377,273 @@ impl WorkspaceIndex {
             annotation_id: None,
         }))
     }
+}
+
+struct RenamedResolver<'a> {
+    workspace: &'a WorkspaceIndex,
+    target_document: &'a IndexedDocument,
+    target: &'a Declaration,
+    new_name: &'a str,
+}
+
+impl<'a> RenamedResolver<'a> {
+    fn resolve_occurrence(
+        &self,
+        current: &'a IndexedDocument,
+        occurrence: &SemanticOccurrence,
+    ) -> Option<&'a Declaration> {
+        if let Some(receiver) = &occurrence.receiver {
+            return self.resolve_qualified_member(
+                current,
+                receiver,
+                self.new_name,
+                occurrence.byte_offset,
+            );
+        }
+        self.resolve_visible_name(current, self.new_name, occurrence.byte_offset)
+            .or_else(|| self.unique_script(self.new_name).map(|(_, script)| script))
+    }
+
+    fn resolve_qualified_member(
+        &self,
+        current: &'a IndexedDocument,
+        receiver: &str,
+        member: &str,
+        offset: usize,
+    ) -> Option<&'a Declaration> {
+        if let Some(receiver_declaration) = self.resolve_visible_name(current, receiver, offset) {
+            let ty = &receiver_declaration.ty.as_ref()?.name;
+            return self.unique_named(self.members_of_type(current, ty), member);
+        }
+        let (document, script) = self.unique_script(receiver)?;
+        self.unique_named(
+            document
+                .semantic
+                .declarations
+                .iter()
+                .filter(|declaration| {
+                    declaration.kind == DeclarationKind::Function
+                        && declaration.is_global
+                        && declaration.container.is_none()
+                        && declaration
+                            .owner_script
+                            .as_deref()
+                            .is_some_and(|owner| owner.eq_ignore_ascii_case(&script.name))
+                })
+                .collect(),
+            member,
+        )
+    }
+
+    fn resolve_visible_name(
+        &self,
+        current: &'a IndexedDocument,
+        name: &str,
+        offset: usize,
+    ) -> Option<&'a Declaration> {
+        let scoped = current
+            .semantic
+            .declarations
+            .iter()
+            .filter(|declaration| self.name_matches(declaration, name))
+            .filter(|declaration| {
+                declaration.scope.contains(&offset) && declaration.container.is_some()
+            })
+            .collect::<Vec<_>>();
+        if let Some(declaration) = self.unique_named(scoped, name) {
+            return Some(declaration);
+        }
+        let top_level = current
+            .semantic
+            .declarations
+            .iter()
+            .filter(|declaration| {
+                self.name_matches(declaration, name) && declaration.container.is_none()
+            })
+            .collect::<Vec<_>>();
+        if let Some(declaration) = self.unique_named(top_level, name) {
+            return Some(declaration);
+        }
+        let script = current
+            .semantic
+            .script_name
+            .as_deref()
+            .and_then(|script_name| self.unique_script(script_name).map(|(_, script)| script))?;
+        self.unique_named(self.members_of(script), name)
+            .or_else(|| self.resolve_imported(current, name))
+    }
+
+    fn resolve_imported(
+        &self,
+        current: &'a IndexedDocument,
+        name: &str,
+    ) -> Option<&'a Declaration> {
+        let matches = current
+            .semantic
+            .imports
+            .iter()
+            .filter_map(|module| self.unique_script(module).map(|(document, _)| document))
+            .flat_map(|document| &document.semantic.declarations)
+            .filter(|declaration| self.name_matches(declaration, name))
+            .filter(|declaration| {
+                declaration.kind == DeclarationKind::Struct
+                    || (declaration.kind == DeclarationKind::Function && declaration.is_global)
+            })
+            .collect::<Vec<_>>();
+        self.unique_named(matches, name)
+    }
+
+    fn unique_script(&self, name: &str) -> Option<(&'a IndexedDocument, &'a Declaration)> {
+        let mut candidates = self
+            .workspace
+            .documents
+            .values()
+            .filter_map(|document| {
+                document
+                    .semantic
+                    .declarations
+                    .iter()
+                    .find(|declaration| {
+                        declaration.kind == DeclarationKind::Script
+                            && self.name_matches(declaration, name)
+                    })
+                    .map(|script| (document, script))
+            })
+            .collect::<Vec<_>>();
+        let priority = candidates
+            .iter()
+            .map(|(document, _)| document.priority)
+            .min()?;
+        candidates.retain(|(document, _)| document.priority == priority);
+        let first = candidates.first()?.0;
+        if candidates
+            .iter()
+            .any(|(document, _)| !self.same_effective_content(first, document))
+        {
+            return None;
+        }
+        candidates.sort_by_key(|(document, _)| rename_navigation_key(document));
+        Some(candidates.remove(0))
+    }
+
+    fn members_of(&self, script: &'a Declaration) -> Vec<&'a Declaration> {
+        let mut members = Vec::new();
+        let mut visited = HashSet::new();
+        let mut current = Some(self.declaration_name(script).to_owned());
+        while let Some(name) = current {
+            if !visited.insert(name.to_ascii_lowercase()) {
+                break;
+            }
+            let Some((document, resolved_script)) = self.unique_script(&name) else {
+                break;
+            };
+            for declaration in &document.semantic.declarations {
+                if declaration
+                    .owner_script
+                    .as_deref()
+                    .is_some_and(|owner| owner.eq_ignore_ascii_case(&resolved_script.name))
+                    && declaration.container.is_none()
+                    && !matches!(
+                        declaration.kind,
+                        DeclarationKind::Script | DeclarationKind::Parameter
+                    )
+                    && !declaration.is_global
+                    && !members.iter().any(|existing: &&Declaration| {
+                        self.declaration_name(existing)
+                            .eq_ignore_ascii_case(self.declaration_name(declaration))
+                    })
+                {
+                    members.push(declaration);
+                }
+            }
+            current = document.semantic.parent_script.clone();
+        }
+        members
+    }
+
+    fn members_of_type(
+        &self,
+        current: &'a IndexedDocument,
+        type_name: &str,
+    ) -> Vec<&'a Declaration> {
+        if let Some((_, script)) = self.unique_script(type_name) {
+            return self.members_of(script);
+        }
+        let Some(structure) = self
+            .resolve_imported(current, type_name)
+            .filter(|declaration| declaration.kind == DeclarationKind::Struct)
+        else {
+            return Vec::new();
+        };
+        let Some(document) = self
+            .workspace
+            .declaration_location(structure)
+            .and_then(|(uri, _)| self.workspace.documents.get(&uri))
+        else {
+            return Vec::new();
+        };
+        document
+            .semantic
+            .declarations
+            .iter()
+            .filter(|declaration| {
+                declaration
+                    .container
+                    .as_deref()
+                    .is_some_and(|container| container.eq_ignore_ascii_case(&structure.name))
+            })
+            .collect()
+    }
+
+    fn unique_named(
+        &self,
+        declarations: Vec<&'a Declaration>,
+        name: &str,
+    ) -> Option<&'a Declaration> {
+        let mut matches = declarations
+            .into_iter()
+            .filter(|declaration| self.name_matches(declaration, name));
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
+    fn name_matches(&self, declaration: &Declaration, name: &str) -> bool {
+        self.declaration_name(declaration)
+            .eq_ignore_ascii_case(name)
+    }
+
+    fn declaration_name<'b>(&self, declaration: &'b Declaration) -> &'b str
+    where
+        'a: 'b,
+    {
+        if std::ptr::eq(declaration, self.target) {
+            self.new_name
+        } else {
+            &declaration.name
+        }
+    }
+
+    fn same_effective_content(&self, left: &IndexedDocument, right: &IndexedDocument) -> bool {
+        if std::ptr::eq(left, right) {
+            return true;
+        }
+        if std::ptr::eq(left, self.target_document) || std::ptr::eq(right, self.target_document) {
+            return false;
+        }
+        left.content_hash == right.content_hash
+    }
+}
+
+fn rename_navigation_key(document: &IndexedDocument) -> (bool, String) {
+    let path = document
+        .path
+        .as_deref()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| document.semantic.uri.as_str().to_owned());
+    (
+        path.to_ascii_lowercase().contains("/staging/"),
+        path.to_ascii_lowercase(),
+    )
 }
 
 fn validate_name(name: &str, qualified: bool) -> Result<(), String> {
@@ -567,6 +918,79 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_rename_that_would_rebind_an_edited_reference() {
+        let root = temp_root("rename-rebind");
+        let path = root.join("Project.psc");
+        fs::write(
+            &path,
+            concat!(
+                "ScriptName Project\n",
+                "Int Property Count Auto\n",
+                "Function Test()\n",
+                "  Int Value = 1\n",
+                "  Count = Value\n",
+                "EndFunction\n",
+            ),
+        )
+        .unwrap();
+        let index = WorkspaceIndex::new(&WorkspaceConfig {
+            source_roots: vec![root.clone()],
+            ..WorkspaceConfig::default()
+        })
+        .unwrap();
+        let error = index
+            .rename(
+                &path_to_file_uri(&path).unwrap(),
+                Position::new(1, 13),
+                "Value",
+                true,
+                false,
+            )
+            .unwrap_err();
+        assert!(error.contains("would change what a reference"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn versioned_document_changes_use_open_document_versions() {
+        let root = temp_root("rename-versions");
+        let path = root.join("Project.psc");
+        fs::write(
+            &path,
+            "ScriptName Project\nFunction Test(Int Input)\n  Input = 1\nEndFunction\n",
+        )
+        .unwrap();
+        let index = WorkspaceIndex::new(&WorkspaceConfig {
+            source_roots: vec![root.clone()],
+            ..WorkspaceConfig::default()
+        })
+        .unwrap();
+        let uri = path_to_file_uri(&path).unwrap();
+        let edit = index
+            .rename_with_versions(
+                &uri,
+                Position::new(1, 18),
+                "Renamed",
+                true,
+                false,
+                &[(uri.clone(), 42)],
+            )
+            .unwrap()
+            .unwrap();
+        let DocumentChanges::Operations(operations) = edit.document_changes.unwrap() else {
+            panic!("expected document change operations");
+        };
+        let version = operations
+            .into_iter()
+            .find_map(|operation| match operation {
+                lsp_types::DocumentChangeOperation::Edit(edit) => edit.text_document.version,
+                lsp_types::DocumentChangeOperation::Op(_) => None,
+            });
+        assert_eq!(version, Some(42));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn returns_text_edits_and_a_same_namespace_script_file_rename() {
         let root = temp_root("rename-script");
         let namespace = root.join("Venworks").join("Core");
@@ -621,6 +1045,20 @@ mod tests {
         let rename = file_rename(&edit).unwrap();
         assert!(rename.old_uri.as_str().ends_with("/Actor.psc"));
         assert!(rename.new_uri.as_str().ends_with("/RenamedActor.psc"));
+
+        let case_only = index
+            .rename(
+                &actor_uri,
+                Position::new(0, 25),
+                "Venworks:Core:actor",
+                true,
+                true,
+            )
+            .unwrap()
+            .unwrap();
+        let rename = file_rename(&case_only).unwrap();
+        assert!(rename.old_uri.as_str().ends_with("/Actor.psc"));
+        assert!(rename.new_uri.as_str().ends_with("/actor.psc"));
 
         fs::write(namespace.join("RenamedActor.psc"), "; occupied\n").unwrap();
         assert!(

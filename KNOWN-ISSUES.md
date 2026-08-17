@@ -18,7 +18,7 @@ For a missing closing keyword, the server reports the conflicting closer or the 
 
 ## Workspace scope
 
-The index scans configured source roots and import directories and overlays open buffers. Indexing is synchronous, the active index is held in memory, and parsed declarations and identifier occurrences are restored from a local cache when source metadata and fingerprints match. `auto` does not infer a game dialect. Starfield SDK discovery requires an installed Steam Creation Kit and an explicit `starfield` dialect. Unsupported or ambiguous expressions intentionally produce no IntelliSense or reference result.
+The index scans configured source roots and import directories on a bounded background worker and overlays open buffers. The active index is held in memory, and parsed declarations, call sites, and identifier occurrences are restored from a private per-user cache only when source metadata and the current content fingerprint match. Requests requiring the complete workspace index wait for initial indexing; diagnostics and document symbols remain available for open buffers. `auto` does not infer a game dialect. Starfield SDK discovery requires an installed Steam Creation Kit and an explicit `starfield` dialect. Unsupported or ambiguous expressions intentionally produce no IntelliSense or reference result.
 
 Rename edits declarations and resolved occurrences in project source roots only. Configured imports and discovered SDK sources are read-only. Script rename can rename the matching `.psc` file when the client supports LSP rename-file operations, but the namespace prefix cannot change and namespace-directory moves are not inferred.
 

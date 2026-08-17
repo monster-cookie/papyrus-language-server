@@ -18,7 +18,8 @@ pub(crate) fn is_generated_source(path: &Path) -> bool {
         .and_then(|value| value.to_str())
         .unwrap_or_default();
     ["QF_", "PF_", "TIF_", "SF_"].iter().any(|prefix| {
-        stem.len() >= prefix.len() && stem[..prefix.len()].eq_ignore_ascii_case(prefix)
+        stem.get(..prefix.len())
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
     })
 }
 
@@ -40,5 +41,6 @@ mod tests {
         }
         assert!(!is_generated_source(Path::new("Scripts/Source/Quest.psc")));
         assert!(!is_generated_source(Path::new("Scripts/Source/Perk.psc")));
+        assert!(!is_generated_source(Path::new("Scripts/Source/éé.psc")));
     }
 }

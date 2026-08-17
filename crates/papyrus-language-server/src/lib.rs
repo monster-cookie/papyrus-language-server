@@ -1,11 +1,13 @@
 //! Core Papyrus analysis and Language Server Protocol implementation.
 
 mod cache;
+mod cache_paths;
 mod config;
 mod diagnostics;
 mod discovery;
 mod documents;
 mod index_cache;
+mod indexing;
 mod line_index;
 mod semantic;
 mod server;

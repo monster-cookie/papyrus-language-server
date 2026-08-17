@@ -1,9 +1,11 @@
 use std::{
-    fs,
+    fs::File,
+    io::Read as _,
     path::{Path, PathBuf},
 };
 
 const CREATION_KIT_APP_ID: &str = "2722710";
+const MAX_STEAM_METADATA_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Source locations supplied by a Starfield Creation Kit installation.
 pub(crate) struct StarfieldSources {
@@ -25,7 +27,7 @@ fn sources_from_library(library: &Path) -> Option<StarfieldSources> {
     let manifest = library
         .join("steamapps")
         .join(format!("appmanifest_{CREATION_KIT_APP_ID}.acf"));
-    let text = fs::read_to_string(manifest).ok()?;
+    let text = read_metadata(manifest)?;
     let install_dir = quoted_value(&text, "installdir")?;
     let installation = library.join("steamapps").join("common").join(install_dir);
     let source_directory = installation.join("Data").join("Scripts").join("Source");
@@ -40,7 +42,7 @@ fn sources_from_library(library: &Path) -> Option<StarfieldSources> {
 fn steam_libraries(root: &Path) -> Vec<PathBuf> {
     let mut libraries = vec![root.to_owned()];
     let path = root.join("steamapps").join("libraryfolders.vdf");
-    if let Ok(text) = fs::read_to_string(path) {
+    if let Some(text) = read_metadata(path) {
         for line in text.lines() {
             if let Some(path) = quoted_value(line, "path") {
                 let candidate = PathBuf::from(path.replace("\\\\", "\\"));
@@ -60,6 +62,20 @@ fn quoted_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
         let value = values.next()?;
         found_key.eq_ignore_ascii_case(key).then_some(value)
     })
+}
+
+/// Reads bounded UTF-8 Steam metadata, rejecting oversized or malformed files.
+fn read_metadata(path: PathBuf) -> Option<String> {
+    let mut bytes = Vec::new();
+    File::open(path)
+        .ok()?
+        .take(MAX_STEAM_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_STEAM_METADATA_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 #[cfg(windows)]

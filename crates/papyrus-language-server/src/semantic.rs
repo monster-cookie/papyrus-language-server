@@ -60,7 +60,7 @@ pub(crate) struct SemanticOccurrence {
     pub(crate) byte_offset: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SemanticCallSite {
     pub(crate) callee_range: Range,
     argument_range: ByteRange<usize>,
@@ -68,7 +68,7 @@ pub(crate) struct SemanticCallSite {
     arguments: Vec<SemanticCallArgument>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct SemanticCallArgument {
     name: Option<String>,
     byte_range: ByteRange<usize>,
@@ -138,9 +138,7 @@ pub(crate) struct SemanticDocument {
     pub(crate) imports: Vec<String>,
     pub(crate) declarations: Vec<Declaration>,
     pub(crate) occurrences: Vec<SemanticOccurrence>,
-    #[serde(skip)]
     pub(crate) call_sites: Vec<SemanticCallSite>,
-    #[serde(skip)]
     pub(crate) symbols: Vec<DocumentSymbol>,
 }
 

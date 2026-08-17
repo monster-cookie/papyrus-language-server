@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs::{self, File},
+    io::Read as _,
     path::{Path, PathBuf},
     str::FromStr,
     time::Instant,
@@ -8,6 +9,7 @@ use std::{
 
 mod navigation;
 mod rename;
+mod scanning;
 
 use lsp_types::{
     CompletionItem, CompletionItemKind, DocumentSymbol, Documentation, Location, Position,
@@ -17,6 +19,7 @@ use lsp_types::{
 use crate::{
     config::WorkspaceConfig,
     index_cache::{CachedDocument, IndexCache},
+    indexing::{IndexingControl, IndexingLimits},
     line_index::LineIndex,
     semantic::{Declaration, DeclarationKind, SemanticDocument, SemanticExtractor},
     source_filter::is_generated_source,
@@ -39,18 +42,43 @@ struct IndexedDocument {
     content_hash: blake3::Hash,
 }
 
+enum DiskIndexResult {
+    Ignored,
+    Indexed(u64),
+    TooLarge,
+}
+
 impl WorkspaceIndex {
+    #[cfg(test)]
     pub(crate) fn new(config: &WorkspaceConfig) -> Result<Self, String> {
-        let started = Instant::now();
-        let mut index = Self {
+        Self::build(config, None)
+    }
+
+    pub(crate) fn new_with_control(
+        config: &WorkspaceConfig,
+        control: &IndexingControl,
+    ) -> Result<Self, String> {
+        Self::build(config, Some(control))
+    }
+
+    pub(crate) fn empty(config: &WorkspaceConfig) -> Result<Self, String> {
+        Ok(Self {
             config: config.clone(),
             documents: HashMap::new(),
             semantic_extractor: SemanticExtractor::new()?,
             scripts_by_name: HashMap::new(),
             occurrences_by_name: HashMap::new(),
             index_cache: IndexCache::load(),
-        };
-        index.scan();
+        })
+    }
+
+    fn build(config: &WorkspaceConfig, control: Option<&IndexingControl>) -> Result<Self, String> {
+        let started = Instant::now();
+        let mut index = Self::empty(config)?;
+        index.scan(control);
+        if control.is_some_and(IndexingControl::is_cancelled) {
+            return Err("workspace indexing cancelled".to_owned());
+        }
         index.rebuild_lookups();
         if let Err(error) = index.index_cache.save() {
             eprintln!("papyrus-language-server: failed to save semantic index cache: {error}");
@@ -66,58 +94,52 @@ impl WorkspaceIndex {
         Ok(index)
     }
 
-    fn scan(&mut self) {
-        let mut visited = HashSet::new();
-        let roots = self.config.roots().cloned().collect::<Vec<_>>();
-        for root in roots {
-            self.scan_path(&root, &mut visited);
-        }
-    }
-
-    fn scan_path(&mut self, path: &Path, visited: &mut HashSet<PathBuf>) {
-        let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
-        if !visited.insert(canonical) {
-            return;
-        }
-        if path.is_file() {
-            self.index_disk_file(path);
-            return;
-        }
-        let Ok(entries) = fs::read_dir(path) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() && !file_type.is_symlink() {
-                self.scan_path(&path, visited);
-            } else if file_type.is_file() {
-                self.index_disk_file(&path);
-            }
-        }
-    }
-
     fn index_disk_file(&mut self, path: &Path) {
+        let _ = self.index_disk_file_bounded(path, IndexingLimits::default().max_file_bytes);
+    }
+
+    fn index_disk_file_bounded(&mut self, path: &Path, max_bytes: u64) -> DiskIndexResult {
         if !is_papyrus_file(path) {
-            return;
+            return DiskIndexResult::Ignored;
         }
         if self
             .config
             .discovered_import_directories
             .iter()
-            .any(|root| path.starts_with(root))
-            && is_generated_source(path)
+            .filter_map(|root| path.strip_prefix(root).ok())
+            .any(is_generated_source)
         {
-            return;
+            return DiskIndexResult::Ignored;
         }
         let Some(uri) = path_to_file_uri(path) else {
-            return;
+            return DiskIndexResult::Ignored;
         };
+        let Ok(metadata) = fs::metadata(path) else {
+            return DiskIndexResult::Ignored;
+        };
+        if metadata.len() > max_bytes {
+            return DiskIndexResult::TooLarge;
+        }
+        let Ok(file) = File::open(path) else {
+            return DiskIndexResult::Ignored;
+        };
+        let mut bytes = Vec::with_capacity(metadata.len().min(max_bytes) as usize);
+        let Ok(_) = file
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+        else {
+            return DiskIndexResult::Ignored;
+        };
+        if bytes.len() as u64 > max_bytes {
+            return DiskIndexResult::TooLarge;
+        };
+        let byte_count = bytes.len() as u64;
+        let text = String::from_utf8_lossy(&bytes);
+        let content_hash = normalized_content_hash(&text);
         let priority = self.path_priority(path);
-        if let Some(mut cached) = self.index_cache.get(path) {
+        if let Some(mut cached) = self.index_cache.get(path, content_hash) {
             cached.semantic.uri = uri.clone();
+            cached.semantic.text = text.into_owned();
             self.documents.insert(
                 uri,
                 IndexedDocument {
@@ -128,13 +150,10 @@ impl WorkspaceIndex {
                     content_hash: cached.content_hash,
                 },
             );
-            return;
+            return DiskIndexResult::Indexed(byte_count);
         }
-        let Ok(bytes) = fs::read(path) else {
-            return;
-        };
-        let text = String::from_utf8_lossy(&bytes);
         self.index_text(uri, Some(path.to_owned()), priority, &text);
+        DiskIndexResult::Indexed(byte_count)
     }
 
     fn path_priority(&self, path: &Path) -> u8 {
@@ -167,13 +186,24 @@ impl WorkspaceIndex {
     }
 
     pub(crate) fn close(&mut self, uri: &Uri) {
-        let path = self.documents.get(uri).and_then(|entry| entry.path.clone());
+        let path = self
+            .documents
+            .get(uri)
+            .and_then(|entry| entry.path.clone())
+            .or_else(|| self.workspace_path(uri));
+        self.documents.remove(uri);
         if let Some(path) = path {
             self.index_disk_file(&path);
-        } else {
-            self.documents.remove(uri);
         }
         self.rebuild_lookups();
+    }
+
+    fn workspace_path(&self, uri: &Uri) -> Option<PathBuf> {
+        let path = crate::config::file_uri_to_path(uri.as_str())?;
+        self.config
+            .roots()
+            .any(|root| path.starts_with(root))
+            .then_some(path)
     }
 
     fn index_text(&mut self, uri: Uri, path: Option<PathBuf>, priority: u8, text: &str) {
@@ -439,6 +469,15 @@ fn is_papyrus_file(path: &Path) -> bool {
 
 fn path_to_file_uri(path: &Path) -> Option<Uri> {
     let absolute = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    path_to_file_uri_lexical(&absolute)
+}
+
+fn path_to_file_uri_lexical(path: &Path) -> Option<Uri> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
     let display = normalize_windows_path(&absolute.to_string_lossy()).replace('\\', "/");
     let prefix = if display.starts_with("//") {
         "file:"
@@ -481,7 +520,7 @@ mod tests {
 
     use crate::WorkspaceConfig;
 
-    use super::{WorkspaceIndex, normalize_windows_path, path_to_file_uri};
+    use super::{DiskIndexResult, WorkspaceIndex, normalize_windows_path, path_to_file_uri};
 
     #[test]
     fn completes_only_resolved_members_and_follows_inheritance() {
@@ -557,7 +596,7 @@ mod tests {
     fn script_qualified_globals_resolve_from_discovered_sources_and_prefer_projects() {
         let root = temp_root("script-qualified");
         let project_root = root.join("project");
-        let sdk_root = root.join("sdk");
+        let sdk_root = root.join("Fragments").join("sdk");
         fs::create_dir_all(&project_root).unwrap();
         fs::create_dir_all(sdk_root.join("Fragments")).unwrap();
         let sdk_game_path = sdk_root.join("Game.psc");
@@ -999,6 +1038,46 @@ mod tests {
             index.definition(&uri, Position::new(3, 12)).unwrap().uri,
             path_to_file_uri(&root.join("Actor.psc")).unwrap()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn closing_an_overlay_for_a_deleted_file_removes_stale_symbols() {
+        let root = temp_root("deleted-overlay");
+        let path = root.join("Deleted.psc");
+        fs::write(&path, "ScriptName Deleted\n").unwrap();
+        let uri = path_to_file_uri(&path).unwrap();
+        let mut index = WorkspaceIndex::new(&WorkspaceConfig {
+            source_roots: vec![root.clone()],
+            ..WorkspaceConfig::default()
+        })
+        .unwrap();
+        index.overlay(
+            uri.clone(),
+            "ScriptName Deleted\nFunction Unsaved()\nEndFunction\n",
+        );
+        assert!(!index.document_symbols(&uri).is_empty());
+        fs::remove_file(&path).unwrap();
+        index.close(&uri);
+        assert!(index.document_symbols(&uri).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bounded_disk_indexing_rejects_an_oversized_source() {
+        let root = temp_root("oversized-source");
+        let path = root.join("Large.psc");
+        fs::write(&path, "ScriptName Large\n").unwrap();
+        let mut index = WorkspaceIndex::empty(&WorkspaceConfig {
+            source_roots: vec![root.clone()],
+            ..WorkspaceConfig::default()
+        })
+        .unwrap();
+        assert!(matches!(
+            index.index_disk_file_bounded(&path, 4),
+            DiskIndexResult::TooLarge
+        ));
+        assert!(index.documents.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 

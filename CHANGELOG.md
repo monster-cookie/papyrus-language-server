@@ -17,6 +17,12 @@
 - Added conservative project-source rename with identifier and collision validation, ambiguity safeguards, external-source protection, and same-namespace Papyrus script file renames through LSP workspace edits.
 - Persisted syntax-backed identifier occurrences in semantic cache schema v4 without storing source text.
 - Split semantic navigation and shared resolution from the workspace indexing and completion module.
+- Moved discovery, bounded scanning, and Starfield source extraction behind initialization onto a cancellable background worker with LSP progress reporting and overlay replay.
+- Hardened semantic and Starfield caches with private platform directories, content verification, resource limits, exclusive staging, and immutable atomic generations.
+- Contained malformed LSP parameters without terminating the session and corrected inbound Windows UNC file URI handling.
+- Made rename validate every edit in a post-rename semantic view, attach open-document versions, and support case-only script file renames.
+- Fixed Unicode-safe generated-source filtering, root-relative fragment filtering, and stale overlays after a backing file is deleted.
+- Added Windows, Linux, and macOS Rust CI coverage plus a pinned RustSec dependency audit.
 
 ## Version 0.1.0 (August 2nd, 2026)
 
