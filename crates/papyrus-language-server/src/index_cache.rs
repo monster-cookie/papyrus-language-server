@@ -474,7 +474,9 @@ mod tests {
         let lower = root.join("case.psc");
         fs::write(&upper, "ScriptName Upper\n").unwrap();
         fs::write(&lower, "ScriptName Lower\n").unwrap();
-        assert_ne!(path_key(&upper), path_key(&lower));
+        if fs::canonicalize(&upper).unwrap() != fs::canonicalize(&lower).unwrap() {
+            assert_ne!(path_key(&upper), path_key(&lower));
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

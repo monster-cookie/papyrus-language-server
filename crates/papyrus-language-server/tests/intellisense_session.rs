@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use lsp_server::{Connection, Message, Notification, Request, RequestId};
+use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde_json::{Value, json};
 
 #[test]
@@ -36,6 +36,7 @@ fn advertises_and_serves_source_derived_intellisense() {
         "initialize",
         json!({
             "capabilities": {
+                "window": { "workDoneProgress": true },
                 "workspace": {
                     "workspaceEdit": {
                         "documentChanges": true,
@@ -79,6 +80,7 @@ fn advertises_and_serves_source_derived_intellisense() {
             json!({}),
         )))
         .unwrap();
+    wait_for_workspace_indexing(&client);
 
     let uri = path_uri(&project);
     client.sender.send(Message::Notification(Notification::new("textDocument/didOpen".to_owned(), json!({
@@ -143,7 +145,11 @@ fn advertises_and_serves_source_derived_intellisense() {
     );
     let references = receive_response(&client);
     let references = references.as_array().unwrap();
-    assert_eq!(references.len(), 2);
+    assert_eq!(
+        references.len(),
+        2,
+        "unexpected references: {references:#?}"
+    );
     assert!(
         references
             .iter()
@@ -307,6 +313,48 @@ fn receive_notification(connection: &Connection, method: &str) {
         panic!("expected notification");
     };
     assert_eq!(notification.method, method);
+}
+
+fn wait_for_workspace_indexing(connection: &Connection) {
+    let Message::Request(create) = connection
+        .receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("work-done progress creation request should arrive")
+    else {
+        panic!("expected work-done progress creation request");
+    };
+    assert_eq!(create.method, "window/workDoneProgress/create");
+    let token = create.params["token"].clone();
+    connection
+        .sender
+        .send(Message::Response(Response::new_ok(create.id, Value::Null)))
+        .unwrap();
+
+    let mut saw_begin = false;
+    loop {
+        let Message::Notification(notification) = connection
+            .receiver
+            .recv_timeout(Duration::from_secs(15))
+            .expect("workspace indexing progress should arrive")
+        else {
+            panic!("expected workspace indexing progress notification");
+        };
+        assert_eq!(notification.method, "$/progress");
+        assert_eq!(notification.params["token"], token);
+        match notification.params["value"]["kind"].as_str() {
+            Some("begin") => saw_begin = true,
+            Some("report") => {}
+            Some("end") => {
+                assert!(saw_begin, "indexing ended before progress began");
+                assert_eq!(
+                    notification.params["value"]["message"],
+                    "Workspace indexing complete"
+                );
+                break;
+            }
+            kind => panic!("unexpected workspace indexing progress kind: {kind:?}"),
+        }
+    }
 }
 
 fn path_uri(path: &std::path::Path) -> String {

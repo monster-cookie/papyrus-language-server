@@ -1082,11 +1082,20 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_windows_extended_paths_for_file_uris() {
+    fn normalizes_windows_extended_paths() {
         assert_eq!(
             normalize_windows_path(r"\\?\C:\Repositories\Project\Script.psc"),
             r"C:\Repositories\Project\Script.psc"
         );
+        assert_eq!(
+            normalize_windows_path(r"\\?\UNC\server\share\Script.psc"),
+            r"\\server\share\Script.psc"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn converts_windows_extended_paths_to_file_uris() {
         assert_eq!(
             path_to_file_uri(std::path::Path::new(
                 r"\\?\C:\Repositories\Project\Script.psc"
@@ -1094,10 +1103,6 @@ mod tests {
             .unwrap()
             .as_str(),
             "file:///C:/Repositories/Project/Script.psc"
-        );
-        assert_eq!(
-            normalize_windows_path(r"\\?\UNC\server\share\Script.psc"),
-            r"\\server\share\Script.psc"
         );
         assert_eq!(
             path_to_file_uri(std::path::Path::new(r"\\?\UNC\server\share\Script.psc"))
