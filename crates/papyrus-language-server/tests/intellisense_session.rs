@@ -132,6 +132,7 @@ fn advertises_and_serves_source_derived_intellisense() {
     );
     let definition = receive_response(&client);
     assert!(definition["uri"].as_str().unwrap().ends_with("Actor.psc"));
+    let actor_uri = definition["uri"].as_str().unwrap().to_owned();
 
     send_request(
         &client,
@@ -219,7 +220,6 @@ fn advertises_and_serves_source_derived_intellisense() {
         2
     );
 
-    let actor_uri = path_uri(&root.join("Actor.psc"));
     send_request(
         &client,
         9,
