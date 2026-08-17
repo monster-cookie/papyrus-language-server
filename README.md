@@ -67,7 +67,7 @@ Imported scripts contribute their declared structs and `Global` functions to com
 
 The server fingerprints normalized source text with BLAKE3. Scripts with the same case-insensitive script name and content fingerprint share one semantic identity even when projects contain identical `Papyrus` and `Staging` copies. A same-name script with different contents remains ambiguous; the server does not silently choose one implementation.
 
-Parsed declarations, call sites, and syntax-backed identifier occurrences are persisted in immutable schema-v6 generations under the platform cache directory:
+Parsed declarations, call sites, expression receivers, and syntax-backed identifier occurrences are persisted in immutable schema-v7 generations under the platform cache directory:
 
 - Windows: `%LOCALAPPDATA%\papyrus-language-server\cache`
 - Linux: `${XDG_CACHE_HOME:-$HOME/.cache}/papyrus-language-server/cache`

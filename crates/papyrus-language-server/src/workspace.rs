@@ -7,6 +7,7 @@ use std::{
     time::Instant,
 };
 
+mod inference;
 mod navigation;
 mod rename;
 mod scanning;
@@ -313,24 +314,18 @@ impl WorkspaceIndex {
         };
         let offset =
             LineIndex::new(&current.semantic.text).byte_offset(&current.semantic.text, position);
-        let declarations = if let Some(receiver) =
-            receiver_before_dot(&current.semantic.text, offset)
-        {
-            self.resolve_visible_name(current, &receiver, offset)
-                .and_then(|declaration| declaration.ty.as_ref())
-                .and_then(|ty| ty.scalar_name())
-                .map(|ty| self.members_of_type(current, ty))
-                .or_else(|| {
-                    self.unique_script(&receiver)
-                        .map(|(_, script)| self.members_of(script))
-                })
-                .map(|declarations| {
-                    declarations
-                        .into_iter()
-                        .filter(|declaration| is_instance_completion_candidate(declaration))
-                        .collect()
-                })
-                .unwrap_or_default()
+        let receiver = current
+            .semantic
+            .member_accesses
+            .iter()
+            .filter(|access| access.contains_offset(offset))
+            .min_by_key(|access| access.span())
+            .map(|access| &access.receiver);
+        let declarations = if let Some(receiver) = receiver {
+            inference::members_for_expression(self, current, receiver)
+                .into_iter()
+                .filter(|declaration| is_instance_completion_candidate(declaration))
+                .collect()
         } else {
             let mut visible = current
                 .semantic
@@ -358,7 +353,7 @@ impl WorkspaceIndex {
             visible
         };
         let mut items = deduplicated_completion_items(declarations);
-        if receiver_before_dot(&current.semantic.text, offset).is_none() {
+        if receiver.is_none() {
             for primitive in ["Bool", "Float", "Int", "String", "Var"] {
                 if !items
                     .iter()
@@ -973,10 +968,23 @@ mod tests {
             "ScriptName Actor\nFunction Two()\nEndFunction\n",
         )
         .unwrap();
+        fs::write(
+            root.join("Factory.psc"),
+            "ScriptName Factory\nActor Function GetActor()\nEndFunction\n",
+        )
+        .unwrap();
         let path = root.join("Project.psc");
         fs::write(
             &path,
-            "ScriptName Project\nActor Target\nFunction Test()\n  Target.One()\nEndFunction\n",
+            concat!(
+                "ScriptName Project\n",
+                "Actor Target\n",
+                "Factory Source\n",
+                "Function Test()\n",
+                "  Target.One()\n",
+                "  Source.GetActor().\n",
+                "EndFunction\n",
+            ),
         )
         .unwrap();
         let index = WorkspaceIndex::new(&WorkspaceConfig {
@@ -986,7 +994,12 @@ mod tests {
         .unwrap();
         assert!(
             index
-                .completion(&path_to_file_uri(&path).unwrap(), Position::new(3, 9))
+                .completion(&path_to_file_uri(&path).unwrap(), Position::new(4, 9))
+                .is_empty()
+        );
+        assert!(
+            index
+                .completion(&path_to_file_uri(&path).unwrap(), Position::new(5, 20))
                 .is_empty()
         );
         let global = index.completion(&path_to_file_uri(&path).unwrap(), Position::new(1, 0));
@@ -995,7 +1008,7 @@ mod tests {
             index
                 .references(
                     &path_to_file_uri(&path).unwrap(),
-                    Position::new(3, 11),
+                    Position::new(4, 11),
                     false
                 )
                 .is_empty()

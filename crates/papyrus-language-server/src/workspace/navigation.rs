@@ -7,10 +7,10 @@ use lsp_types::{
 
 use crate::{
     line_index::LineIndex,
-    semantic::{Declaration, DeclarationKind, SemanticOccurrence},
+    semantic::{Declaration, DeclarationKind, SemanticExpression, SemanticOccurrence},
 };
 
-use super::{IndexedDocument, WorkspaceIndex, is_identifier, receiver_before_dot};
+use super::{IndexedDocument, WorkspaceIndex, inference, is_identifier, receiver_before_dot};
 
 impl WorkspaceIndex {
     pub(crate) fn hover(&self, uri: &Uri, position: Position) -> Option<Hover> {
@@ -214,12 +214,7 @@ impl WorkspaceIndex {
             return self.resolve_named_argument_parameter(current, occurrence);
         }
         if let Some(receiver) = &occurrence.receiver {
-            return self.resolve_qualified_member(
-                current,
-                receiver,
-                &occurrence.name,
-                occurrence.byte_offset,
-            );
+            return inference::resolve_member_expression(self, current, receiver, &occurrence.name);
         }
         self.resolve_visible_name(current, &occurrence.name, occurrence.byte_offset)
             .or_else(|| {
@@ -240,7 +235,15 @@ impl WorkspaceIndex {
         let offset = LineIndex::new(text).byte_offset(text, position);
         let name = word_at(text, offset)?;
         if let Some(receiver) = receiver_before_member(text, offset) {
-            return self.resolve_qualified_member(current, &receiver, &name, offset);
+            return inference::resolve_member_expression(
+                self,
+                current,
+                &SemanticExpression::Identifier {
+                    name: receiver,
+                    byte_offset: offset,
+                },
+                &name,
+            );
         }
         self.resolve_visible_name(current, &name, offset)
             .or_else(|| {
@@ -287,37 +290,6 @@ impl WorkspaceIndex {
                         .is_some_and(|container| container.eq_ignore_ascii_case(&callee.name))
                     && declaration.owner_script == callee.owner_script
             })
-    }
-
-    fn resolve_qualified_member<'a>(
-        &'a self,
-        current: &'a IndexedDocument,
-        receiver: &str,
-        member: &str,
-        offset: usize,
-    ) -> Option<&'a Declaration> {
-        if let Some(receiver_declaration) = self.resolve_visible_name(current, receiver, offset) {
-            let ty = receiver_declaration.ty.as_ref()?.scalar_name()?;
-            return unique_named(self.members_of_type(current, ty), member);
-        }
-        let (document, script) = self.unique_script(receiver)?;
-        unique_named(
-            document
-                .semantic
-                .declarations
-                .iter()
-                .filter(|declaration| {
-                    declaration.kind == DeclarationKind::Function
-                        && declaration.is_global
-                        && declaration.container.is_none()
-                        && declaration
-                            .owner_script
-                            .as_deref()
-                            .is_some_and(|owner| owner.eq_ignore_ascii_case(&script.name))
-                })
-                .collect(),
-            member,
-        )
     }
 
     pub(super) fn resolve_visible_name<'a>(

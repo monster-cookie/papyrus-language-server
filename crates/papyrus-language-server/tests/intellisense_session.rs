@@ -21,10 +21,23 @@ fn advertises_and_serves_source_derived_intellisense() {
         "ScriptName Actor\n{Source evidence}\nFunction Jump(Int Height, String Label)\nEndFunction\n",
     )
     .unwrap();
+    fs::write(
+        root.join("Factory.psc"),
+        "ScriptName Factory\nActor Function GetActor()\nEndFunction\n",
+    )
+    .unwrap();
     let project = root.join("Project.psc");
     fs::write(
         &project,
-        "ScriptName Project\nActor Target\nFunction Test()\n  Target.Jump(1, \"test\")\nEndFunction\n",
+        concat!(
+            "ScriptName Project\n",
+            "Actor Target\n",
+            "Function Test()\n",
+            "  Target.Jump(1, \"test\")\n",
+            "  Factory Source\n",
+            "  Source.GetActor().Ju\n",
+            "EndFunction\n",
+        ),
     )
     .unwrap();
 
@@ -85,7 +98,7 @@ fn advertises_and_serves_source_derived_intellisense() {
     let uri = path_uri(&project);
     client.sender.send(Message::Notification(Notification::new("textDocument/didOpen".to_owned(), json!({
         "textDocument": { "uri": uri, "languageId": "papyrus", "version": 1,
-            "text": "ScriptName Project\nActor Target\nFunction Test()\n  Target.Jump(1, \"test\")\nEndFunction\n" }
+            "text": "ScriptName Project\nActor Target\nFunction Test()\n  Target.Jump(1, \"test\")\n  Factory Source\n  Source.GetActor().Ju\nEndFunction\n" }
     })))).unwrap();
     receive_notification(&client, "textDocument/publishDiagnostics");
 
@@ -100,6 +113,23 @@ fn advertises_and_serves_source_derived_intellisense() {
     let completion = receive_response(&client);
     assert!(
         completion
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "Jump")
+    );
+
+    send_request(
+        &client,
+        12,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri }, "position": { "line": 5, "character": 22 }
+        }),
+    );
+    let chained_completion = receive_response(&client);
+    assert!(
+        chained_completion
             .as_array()
             .unwrap()
             .iter()
@@ -266,7 +296,7 @@ fn advertises_and_serves_source_derived_intellisense() {
             .flat_map(|operation| operation["edits"].as_array().unwrap())
             .filter(|edit| edit["newText"] == "RenamedActor")
             .count(),
-        2
+        3
     );
 
     send_request(&client, 11, "shutdown", json!(null));

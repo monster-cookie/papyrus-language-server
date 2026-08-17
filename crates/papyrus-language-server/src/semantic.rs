@@ -6,6 +6,10 @@ use tree_sitter::{Node, Parser};
 
 use crate::line_index::LineIndex;
 
+mod expression;
+
+pub(crate) use expression::{SemanticExpression, SemanticMemberAccess};
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct TypeRef {
     pub(crate) name: String,
@@ -59,7 +63,7 @@ pub(crate) struct Declaration {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct SemanticOccurrence {
     pub(crate) name: String,
-    pub(crate) receiver: Option<String>,
+    pub(crate) receiver: Option<SemanticExpression>,
     pub(crate) selection_range: Range,
     pub(crate) byte_offset: usize,
     pub(crate) is_named_argument_label: bool,
@@ -144,6 +148,7 @@ pub(crate) struct SemanticDocument {
     pub(crate) declarations: Vec<Declaration>,
     pub(crate) occurrences: Vec<SemanticOccurrence>,
     pub(crate) call_sites: Vec<SemanticCallSite>,
+    pub(crate) member_accesses: Vec<SemanticMemberAccess>,
     pub(crate) symbols: Vec<DocumentSymbol>,
 }
 
@@ -170,6 +175,7 @@ impl SemanticExtractor {
             declarations: Vec::new(),
             occurrences: Vec::new(),
             call_sites: Vec::new(),
+            member_accesses: Vec::new(),
             symbols: Vec::new(),
         };
         let Some(tree) = self.parser.parse(source, None) else {
@@ -213,6 +219,7 @@ impl SemanticExtractor {
             &document.declarations,
             &mut document.call_sites,
         );
+        collect_member_accesses(root, source, &mut document.member_accesses);
         document.call_sites.sort_by_key(|call| {
             (
                 call.callee_range.start,
@@ -394,7 +401,7 @@ fn collect_occurrences(
     }
 }
 
-fn occurrence_receiver(node: Node<'_>, source: &str) -> Option<Option<String>> {
+fn occurrence_receiver(node: Node<'_>, source: &str) -> Option<Option<SemanticExpression>> {
     let Some(parent) = node.parent() else {
         return Some(None);
     };
@@ -405,10 +412,18 @@ fn occurrence_receiver(node: Node<'_>, source: &str) -> Option<Option<String>> {
         return Some(None);
     }
     let object = parent.child_by_field_name("object")?;
-    matches!(object.kind(), "identifier" | "qualified_identifier")
-        .then(|| text(object, source))
-        .flatten()
-        .map(Some)
+    SemanticExpression::from_node(object, source).map(Some)
+}
+
+fn collect_member_accesses(node: Node<'_>, source: &str, output: &mut Vec<SemanticMemberAccess>) {
+    if let Some(access) = SemanticMemberAccess::from_node(node, source) {
+        output.push(access);
+    }
+    output.extend(SemanticMemberAccess::recover_from_children(node, source));
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_member_accesses(child, source, output);
+    }
 }
 
 fn is_named_argument_label(node: Node<'_>) -> bool {
@@ -578,7 +593,7 @@ mod tests {
 
     use lsp_types::Uri;
 
-    use super::{DeclarationKind, SemanticExtractor};
+    use super::{DeclarationKind, SemanticExpression, SemanticExtractor};
 
     #[test]
     fn extracts_parent_types_signatures_scopes_and_documentation() {
@@ -660,11 +675,19 @@ mod tests {
             .unwrap()
             .extract(Uri::from_str("file:///Example.psc").unwrap(), source);
         assert!(document.occurrences.iter().any(|occurrence| {
-            occurrence.name == "Jump" && occurrence.receiver.as_deref() == Some("Target")
+            occurrence.name == "Jump"
+                && matches!(
+                    occurrence.receiver.as_ref(),
+                    Some(SemanticExpression::Identifier { name, .. }) if name == "Target"
+                )
         }));
         assert!(document.occurrences.iter().any(|occurrence| {
             occurrence.name == "Log"
-                && occurrence.receiver.as_deref() == Some("Venworks:Core:Utility")
+                && matches!(
+                    occurrence.receiver.as_ref(),
+                    Some(SemanticExpression::Identifier { name, .. })
+                        if name == "Venworks:Core:Utility"
+                )
         }));
         assert_eq!(
             document

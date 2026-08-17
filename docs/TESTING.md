@@ -26,6 +26,7 @@ Rust tests verify:
 - hover and go to definition resolve the same source-derived declaration;
 - signature help maps positional and named arguments to inherited, imported-global, and script-qualified declarations;
 - nested and incomplete calls select the correct signature and active parameter without guessing ambiguous callees;
+- expression inference follows chained function returns, casts, parenthesized values, array elements, and `Self` while preserving conservative ambiguity handling;
 - script-qualified global calls resolve their script and global function while preserving variable shadowing and project-source precedence;
 - find references honors declaration inclusion, local scopes, parameters, inherited members, imported globals and structs, and conservative ambiguity handling;
 - reference extraction excludes declaration names, named-argument labels, comments, and strings;

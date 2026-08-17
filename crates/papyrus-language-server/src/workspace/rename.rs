@@ -12,7 +12,11 @@ use lsp_types::{
 
 use crate::semantic::{Declaration, DeclarationKind, SemanticOccurrence};
 
-use super::{IndexedDocument, WorkspaceIndex, path_to_file_uri, path_to_file_uri_lexical};
+use super::{
+    IndexedDocument, WorkspaceIndex,
+    inference::{self, ExpressionContext},
+    path_to_file_uri, path_to_file_uri_lexical,
+};
 
 const PAPYRUS_KEYWORDS: &[&str] = &[
     "as",
@@ -403,11 +407,14 @@ struct RenamedResolver<'a> {
 }
 
 impl<'a> RenamedResolver<'a> {
-    fn resolve_occurrence(
-        &self,
+    fn resolve_occurrence<'b>(
+        &'b self,
         current: &'a IndexedDocument,
         occurrence: &SemanticOccurrence,
-    ) -> Option<&'a Declaration> {
+    ) -> Option<&'b Declaration>
+    where
+        'a: 'b,
+    {
         if occurrence.is_named_argument_label {
             let parameter = self
                 .workspace
@@ -416,46 +423,10 @@ impl<'a> RenamedResolver<'a> {
                 .then_some(parameter);
         }
         if let Some(receiver) = &occurrence.receiver {
-            return self.resolve_qualified_member(
-                current,
-                receiver,
-                self.new_name,
-                occurrence.byte_offset,
-            );
+            return inference::resolve_member_expression(self, current, receiver, self.new_name);
         }
         self.resolve_visible_name(current, self.new_name, occurrence.byte_offset)
             .or_else(|| self.unique_script(self.new_name).map(|(_, script)| script))
-    }
-
-    fn resolve_qualified_member(
-        &self,
-        current: &'a IndexedDocument,
-        receiver: &str,
-        member: &str,
-        offset: usize,
-    ) -> Option<&'a Declaration> {
-        if let Some(receiver_declaration) = self.resolve_visible_name(current, receiver, offset) {
-            let ty = receiver_declaration.ty.as_ref()?.scalar_name()?;
-            return self.unique_named(self.members_of_type(current, ty), member);
-        }
-        let (document, script) = self.unique_script(receiver)?;
-        self.unique_named(
-            document
-                .semantic
-                .declarations
-                .iter()
-                .filter(|declaration| {
-                    declaration.kind == DeclarationKind::Function
-                        && declaration.is_global
-                        && declaration.container.is_none()
-                        && declaration
-                            .owner_script
-                            .as_deref()
-                            .is_some_and(|owner| owner.eq_ignore_ascii_case(&script.name))
-                })
-                .collect(),
-            member,
-        )
     }
 
     fn resolve_visible_name(
@@ -633,6 +604,8 @@ impl<'a> RenamedResolver<'a> {
     fn name_matches(&self, declaration: &Declaration, name: &str) -> bool {
         self.declaration_name(declaration)
             .eq_ignore_ascii_case(name)
+            || (std::ptr::eq(declaration, self.target)
+                && declaration.name.eq_ignore_ascii_case(name))
     }
 
     fn declaration_name<'b>(&self, declaration: &'b Declaration) -> &'b str
@@ -654,6 +627,41 @@ impl<'a> RenamedResolver<'a> {
             return false;
         }
         left.content_hash == right.content_hash
+    }
+}
+
+impl ExpressionContext for RenamedResolver<'_> {
+    fn resolve_visible_name<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        name: &str,
+        offset: usize,
+    ) -> Option<&'a Declaration> {
+        RenamedResolver::resolve_visible_name(self, current, name, offset)
+    }
+
+    fn unique_script<'a>(&'a self, name: &str) -> Option<(&'a IndexedDocument, &'a Declaration)> {
+        RenamedResolver::unique_script(self, name)
+    }
+
+    fn members_of<'a>(&'a self, script: &'a Declaration) -> Vec<&'a Declaration> {
+        RenamedResolver::members_of(self, script)
+    }
+
+    fn members_of_type<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        type_name: &str,
+    ) -> Vec<&'a Declaration> {
+        RenamedResolver::members_of_type(self, current, type_name)
+    }
+
+    fn declaration_name<'a>(&'a self, declaration: &'a Declaration) -> &'a str {
+        RenamedResolver::declaration_name(self, declaration)
+    }
+
+    fn name_matches(&self, declaration: &Declaration, name: &str) -> bool {
+        RenamedResolver::name_matches(self, declaration, name)
     }
 }
 
@@ -834,7 +842,21 @@ mod tests {
         let root = temp_root("rename-navigation");
         let base = root.join("Base.psc");
         fs::write(&base, "ScriptName Base\nFunction Jump()\nEndFunction\n").unwrap();
-        fs::write(root.join("Actor.psc"), "ScriptName Actor Extends Base\n").unwrap();
+        let actor = root.join("Actor.psc");
+        fs::write(
+            &actor,
+            concat!(
+                "ScriptName Actor Extends Base\n",
+                "Actor Function Companion()\n",
+                "EndFunction\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join("Factory.psc"),
+            "ScriptName Factory\nActor Function GetActor()\nEndFunction\n",
+        )
+        .unwrap();
         let utility = root.join("Utility.psc");
         fs::write(
             &utility,
@@ -852,9 +874,12 @@ mod tests {
                 "ScriptName Project\n",
                 "Import Utility\n",
                 "Actor Target\n",
+                "Factory Source\n",
                 "Payload Data\n",
                 "Function Test()\n",
                 "  Target.Jump()\n",
+                "  Source.GetActor().Jump()\n",
+                "  Target.Companion().Companion().Jump()\n",
                 "  Log()\n",
                 "EndFunction\n",
             ),
@@ -876,7 +901,19 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        assert_eq!(text_edits(&jump).len(), 2);
+        assert_eq!(text_edits(&jump).len(), 4);
+
+        let companion = index
+            .rename(
+                &path_to_file_uri(&actor).unwrap(),
+                Position::new(1, 16),
+                "Partner",
+                false,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(text_edits(&companion).len(), 3);
 
         let log = index
             .rename(
