@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Version 0.2.0 (August 16th, 2026)
 
 - Added `auto`, Skyrim, Fallout 4, and Starfield workspace configuration.
 - Added recursive project-source and import-directory indexing.
