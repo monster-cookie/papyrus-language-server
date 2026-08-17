@@ -1,13 +1,10 @@
 # Known issues and deferred work
 
-## Diagnostic-first milestone
+## Semantic-navigation milestone
 
-Version 0.1 provides syntax and structural diagnostics for open buffers. It does not yet provide:
+The server provides syntax diagnostics, semantic completion, hover, definition, references, rename, signature help, and document/workspace symbols. It does not yet provide:
 
-- completion or signature help;
-- hover information;
-- go to definition, references, rename, or workspace symbols;
-- workspace indexing or project-aware import resolution;
+- full expression type inference;
 - semantic type checking;
 - compiler discovery or automatic compilation;
 - formatting;
@@ -21,7 +18,11 @@ For a missing closing keyword, the server reports the conflicting closer or the 
 
 ## Workspace scope
 
-Version 0.1 analyzes the current text supplied by an editor. It does not scan neighboring scripts, resolve imports, or infer a game dialect from a project layout.
+The index scans configured source roots and import directories on a bounded background worker and overlays open buffers. The active index is held in memory, and parsed declarations, call sites, and identifier occurrences are restored from a private per-user cache only when source metadata and the current content fingerprint match. Requests requiring the complete workspace index wait for initial indexing; diagnostics and document symbols remain available for open buffers. `auto` does not infer a game dialect. Starfield SDK discovery requires an installed Steam Creation Kit and an explicit `starfield` dialect. Unsupported or ambiguous expressions intentionally produce no IntelliSense or reference result.
+
+Rename edits declarations and resolved occurrences in project source roots only. Configured imports and discovered SDK sources are read-only. Script rename can rename the matching `.psc` file when the client supports LSP rename-file operations, but the namespace prefix cannot change and namespace-directory moves are not inferred.
+
+Old fingerprinted SDK cache generations are not automatically removed yet.
 
 ## Prebuilt platforms
 
@@ -36,4 +37,4 @@ Other operating systems, architectures, and Linux C library environments must bu
 
 ## Compiler and game discovery
 
-The server does not read the Windows registry, Steam libraries, Creation Kit installations, compiler flags, installed game scripts, or user projects automatically. Future compiler integration will require explicit user configuration with optional discovery as a convenience; it must not distribute Bethesda tools or source.
+With the `starfield` dialect selected on Windows, the server reads Steam installation metadata to locate the Starfield Creation Kit source archive. It does not automatically discover compiler executables, compiler flags, installed game scripts outside that archive, or user projects. Future compiler integration will require explicit user configuration with optional discovery as a convenience; it must not distribute Bethesda tools or source.

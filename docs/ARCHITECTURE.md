@@ -30,7 +30,25 @@ produces `Missing EndIf before EndFunction` at `EndFunction`.
 
 ### LSP transport
 
-The server uses a synchronous stdio message loop. It advertises UTF-16 positions and full-text synchronization, stores only open documents in memory, and publishes diagnostics for open, changed, and saved buffers. Closing a document clears its diagnostics.
+The server uses a synchronous stdio message loop with a separate cancellable workspace-indexing worker. It advertises UTF-16 positions and full-text synchronization and publishes diagnostics for open, changed, and saved buffers. Closing a document clears its diagnostics. Invalid request parameters produce an LSP `InvalidParams` response, while malformed notifications are logged and ignored without terminating the session.
+
+### Workspace and symbols
+
+Initialization options select `auto`, `skyrim`, `fallout4`, or `starfield` and may provide project source roots and import directories. File-based LSP workspace folders become source roots when explicit roots are absent. `auto` is currently a safe unspecified value rather than dialect inference.
+
+Initialization responds before discovery, archive extraction, or recursive scanning. The worker applies entry-count, file-count, file-size, total-byte, and depth budgets while recursively indexing `.psc` files. Clients can cancel it through LSP work-done progress. The foreground starts with an empty index that accepts open-document overlays; once the worker completes, the server replays current overlays and disk refreshes before atomically replacing the foreground index. Closing a document restores its current disk version or removes the entry if the backing file was deleted. Tree-sitter declaration nodes produce hierarchical document symbols and a flattened, case-insensitive workspace-symbol view. Duplicate names remain in the index for later semantic resolution.
+
+The semantic index retains declared types, signatures, scopes, inheritance, source documentation, locations, syntax-backed identifier occurrences, and transient call sites for open buffers. Project sources have precedence over configured imports, which have precedence over discovered SDK sources. Duplicate candidates at the same precedence are ambiguous and deliberately do not produce hover, definition, reference, signature-help, or member-completion claims.
+
+Workspace indexing orchestration lives in `indexing.rs`, bounded filesystem traversal in `workspace/scanning.rs`, and completion in `workspace.rs`. Shared declaration resolution, hover, definition, references, and signature help are isolated in `workspace/navigation.rs`, while rename validation and workspace-edit construction live in `workspace/rename.rs`. Find References uses a case-insensitive occurrence lookup to narrow candidates, then resolves each candidate to the selected declaration. It never treats textual matches in comments or strings as references. Results honor lexical scopes and imports, use the canonical navigation copy for identical aliases, and are sorted and deduplicated by URI and range. Rename converts those resolved project-source locations into non-overlapping text edits after validating the new Papyrus identifier and checking case-insensitive scope collisions, then uses a borrowed name-override resolver to require every changed reference to resolve to the renamed declaration without duplicating the workspace index. Configured imports and discovered SDK sources are never edited.
+
+Script rename additionally requires LSP `documentChanges` and the `rename` resource operation. It emits versioned text-document edits followed by a `RenameFile` operation when the old and new script names share a namespace prefix, the source filename matches the old terminal script name, and the destination is either absent or demonstrably the same entry for a case-only rename. Distinct occupied paths and symlink destinations are rejected, while accepted case-only leaf-name changes preserve the requested destination URI casing. This keeps client application atomic without guessing namespace-directory moves. Signature help selects the innermost syntax-backed call at the cursor, maps positional or named arguments to the uniquely resolved declaration, and persists call-site metadata without persisting source text.
+
+Semantic cache schema v6 persists declarations, call sites, symbols, and identifier occurrence metadata so navigation works on cache hits without retaining source text. Cache roots are selected from platform-standard private per-user locations with no shared-temporary fallback. Native path keys are encoded losslessly, and current content is hashed before a cached record is accepted. Writers use exclusive temporary files and uniquely named immutable generations, synchronize content before atomic publication, retain two owned generations, and never remove unrelated files.
+
+On Windows with the Starfield dialect selected, Steam metadata locates app `2722710`. An installed `Data/Scripts/Source` tree is indexed directly when present; otherwise, reusable `Scripts/Source` entries from `Tools/ContentResources.zip` are extracted into a content-addressed staging directory and atomically published to the private platform cache. Archive size, entry count, retained-file count, per-file bytes, extracted bytes, and path depth are bounded. The direct and cached sources are alternatives rather than peers, preventing duplicate SDK definitions. Generated fragment paths and standard fragment-name prefixes are evaluated relative to each discovered root and excluded only from discovered SDK sources.
+
+Windows extended-length drive and UNC paths are normalized before conversion to LSP file URIs so navigation locations remain consumable by editor clients. Inbound file URIs preserve non-local authorities as UNC paths on Windows and reject non-local authorities on Unix.
 
 Standard output is reserved for protocol traffic. Fatal operational errors are written to standard error.
 
@@ -38,17 +56,20 @@ Standard output is reserved for protocol traffic. Fatal operational errors are w
 
 | Dependency | Responsibility | License |
 | --- | --- | --- |
+| `blake3` | Semantic source fingerprinting | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception |
 | `tree-sitter` | Incremental native parser runtime | MIT |
 | `tree-sitter-language` | Version-independent generated grammar handle | MIT |
 | `cc` | Compile the generated C parser during Rust builds | MIT OR Apache-2.0 |
 | `lsp-server` | Synchronous JSON-RPC/LSP transport scaffold | MIT OR Apache-2.0 |
 | `lsp-types` | Language Server Protocol data types | MIT |
 | `serde` and `serde_json` | Protocol serialization and deserialization | MIT OR Apache-2.0 |
+| `winreg` | Windows Steam installation discovery | MIT |
+| `zip` | Starfield Creation Kit source archive extraction | MIT |
 | `tree-sitter-cli` | Parser generation and native corpus tests | MIT |
 | `web-tree-sitter` | Cross-platform WebAssembly fixture validation | MIT |
 
-The Node packages are development-only. Exact resolved Rust and Node versions are recorded in `Cargo.lock` and `package-lock.json`.
+The Node packages are development-only. Exact resolved Rust and Node versions are recorded in `Cargo.lock` and `package-lock.json`. The `tree-sitter-cli` install script is approved only for its exact locked version so npm can install the required native executable.
 
 ## Deferred layers
 
-Workspace indexing, symbol resolution, completion, navigation, compiler discovery, automatic compilation, and debugging are intentionally outside the diagnostic-first milestone. Compiler integration must remain optional and must never redistribute Bethesda tools or source.
+Broader expression inference, semantic checking, compiler discovery, automatic compilation, and debugging remain deferred. Compiler integration must remain optional and must never redistribute Bethesda tools or source.

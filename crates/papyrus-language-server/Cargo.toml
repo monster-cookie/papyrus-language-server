@@ -8,12 +8,17 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+blake3.workspace = true
 lsp-server.workspace = true
 lsp-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tree-sitter.workspace = true
 tree-sitter-papyrus = { path = "../../grammar" }
+zip.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg.workspace = true
 
 [lints]
 workspace = true

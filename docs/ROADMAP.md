@@ -9,15 +9,22 @@
 - Native release archives for Windows, Linux, and macOS.
 - Zed extension download and launch integration.
 
-## 0.2: Workspace model
+## 0.2: Workspace foundation
 
 - Game and dialect selection with a safe `auto` mode.
 - Configured import directories and project source roots.
 - Workspace symbol index.
-- Go to definition, references, hover, and signature help.
-- Project-aware completion.
+- Document and workspace symbol providers.
 
-## 0.3: Optional compiler integration
+## 0.3: Semantic navigation
+
+- Source-derived completion, hover, and go to definition.
+- Starfield Creation Kit source discovery and local navigable cache.
+- References and signature help.
+- Conservative project-source rename, including same-namespace script file renames.
+- Semantic diagnostics.
+
+## 0.4: Optional compiler integration
 
 - Explicit compiler, flags, import, and output settings.
 - Windows registry and Steam-library discovery in the native server.

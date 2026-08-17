@@ -44,6 +44,26 @@ impl LineIndex {
             end: self.position(text, byte_range.end),
         }
     }
+
+    /// Converts a UTF-16 LSP position into a UTF-8 byte offset.
+    pub(crate) fn byte_offset(&self, text: &str, position: Position) -> usize {
+        let line = usize::try_from(position.line).unwrap_or(usize::MAX);
+        let start = *self.line_starts.get(line).unwrap_or(&text.len());
+        let end = self
+            .line_starts
+            .get(line + 1)
+            .copied()
+            .unwrap_or(text.len());
+        let target = usize::try_from(position.character).unwrap_or(usize::MAX);
+        let mut utf16 = 0;
+        for (relative, character) in text[start..end].char_indices() {
+            if utf16 >= target {
+                return start + relative;
+            }
+            utf16 += character.len_utf16();
+        }
+        end
+    }
 }
 
 fn saturating_u32(value: usize) -> u32 {

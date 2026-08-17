@@ -52,6 +52,19 @@ impl DocumentStore {
         self.documents.get(uri)
     }
 
+    /// Iterates over all documents that remain open in the editor.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Uri, &Document)> {
+        self.documents.iter()
+    }
+
+    /// Returns the current version for every versioned open document.
+    pub(crate) fn versions(&self) -> Vec<(Uri, i32)> {
+        self.documents
+            .iter()
+            .filter_map(|(uri, document)| document.version.map(|version| (uri.clone(), version)))
+            .collect()
+    }
+
     /// Removes a closed document.
     pub(crate) fn close(&mut self, uri: &Uri) -> Option<Document> {
         self.documents.remove(uri)
