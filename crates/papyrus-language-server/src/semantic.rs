@@ -16,6 +16,10 @@ impl TypeRef {
     pub(crate) fn display(&self) -> String {
         format!("{}{}", self.name, if self.array { "[]" } else { "" })
     }
+
+    pub(crate) fn scalar_name(&self) -> Option<&str> {
+        (!self.array).then_some(self.name.as_str())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -58,6 +62,7 @@ pub(crate) struct SemanticOccurrence {
     pub(crate) receiver: Option<String>,
     pub(crate) selection_range: Range,
     pub(crate) byte_offset: usize,
+    pub(crate) is_named_argument_label: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -365,10 +370,10 @@ fn collect_occurrences(
         if declarations
             .iter()
             .any(|declaration| declaration.selection_range == selection_range)
-            || is_named_argument_label(node)
         {
             return;
         }
+        let is_named_argument_label = is_named_argument_label(node);
         let Some(receiver) = occurrence_receiver(node, source) else {
             return;
         };
@@ -378,6 +383,7 @@ fn collect_occurrences(
                 receiver,
                 selection_range,
                 byte_offset: node.start_byte(),
+                is_named_argument_label,
             });
         }
         return;
@@ -399,7 +405,7 @@ fn occurrence_receiver(node: Node<'_>, source: &str) -> Option<Option<String>> {
         return Some(None);
     }
     let object = parent.child_by_field_name("object")?;
-    (object.kind() == "identifier")
+    matches!(object.kind(), "identifier" | "qualified_identifier")
         .then(|| text(object, source))
         .flatten()
         .map(Some)
@@ -447,7 +453,6 @@ fn collect(
             | "state_declaration"
             | "struct_declaration"
             | "property_definition"
-            | "group_declaration"
     ) {
         next_container.as_deref().or(container)
     } else {
@@ -646,6 +651,7 @@ mod tests {
             "Function Test()\n",
             "  Target.Jump()\n",
             "  Log(value = Target)\n",
+            "  Venworks:Core:Utility.Log()\n",
             "  ; Target.Jump()\n",
             "  String Evidence = \"Target.Jump()\"\n",
             "EndFunction\n",
@@ -656,6 +662,10 @@ mod tests {
         assert!(document.occurrences.iter().any(|occurrence| {
             occurrence.name == "Jump" && occurrence.receiver.as_deref() == Some("Target")
         }));
+        assert!(document.occurrences.iter().any(|occurrence| {
+            occurrence.name == "Log"
+                && occurrence.receiver.as_deref() == Some("Venworks:Core:Utility")
+        }));
         assert_eq!(
             document
                 .occurrences
@@ -665,16 +675,48 @@ mod tests {
             2
         );
         assert!(
-            !document
+            document
                 .occurrences
                 .iter()
-                .any(|occurrence| occurrence.name == "value")
+                .any(|occurrence| occurrence.name == "value" && occurrence.is_named_argument_label)
         );
         assert!(
             !document
                 .occurrences
                 .iter()
                 .any(|occurrence| occurrence.name == "Example")
+        );
+    }
+
+    #[test]
+    fn keeps_grouped_properties_at_script_scope_and_symbols_grouped() {
+        let source = concat!(
+            "ScriptName Example\n",
+            "Group Configuration\n",
+            "  Bool Property Enabled Auto\n",
+            "EndGroup\n",
+        );
+        let document = SemanticExtractor::new()
+            .unwrap()
+            .extract(Uri::from_str("file:///Example.psc").unwrap(), source);
+        let property = document
+            .declarations
+            .iter()
+            .find(|declaration| declaration.name == "Enabled")
+            .unwrap();
+        assert_eq!(property.container, None);
+        let group = document
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "Configuration")
+            .unwrap();
+        assert!(
+            group
+                .children
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|symbol| symbol.name == "Enabled")
         );
     }
 

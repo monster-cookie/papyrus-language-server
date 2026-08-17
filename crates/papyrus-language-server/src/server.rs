@@ -112,6 +112,7 @@ struct Server {
     documents: DocumentStore,
     dirty_disk_uris: HashSet<Uri>,
     indexing: Option<IndexingTask>,
+    indexing_error: Option<IndexingRequestError>,
     latest_index_progress: Option<IndexingProgress>,
     pending_index_requests: Vec<Request>,
     progress_active: bool,
@@ -120,6 +121,12 @@ struct Server {
     progress_supported: bool,
     rename_support: RenameSupport,
     workspace: WorkspaceIndex,
+}
+
+#[derive(Clone)]
+struct IndexingRequestError {
+    code: i32,
+    message: String,
 }
 
 impl Server {
@@ -136,6 +143,7 @@ impl Server {
             documents: DocumentStore::default(),
             dirty_disk_uris: HashSet::new(),
             indexing: Some(indexing),
+            indexing_error: None,
             latest_index_progress: None,
             pending_index_requests: Vec::new(),
             progress_active: false,
@@ -173,6 +181,7 @@ impl Server {
 
     fn poll_indexing(&mut self, connection: &Connection) -> ServerResult<()> {
         let mut indexing_finished = false;
+        let mut indexing_succeeded = false;
         loop {
             let event = match self.indexing.as_ref().map(IndexingTask::try_recv) {
                 Some(Ok(event)) => event,
@@ -181,6 +190,10 @@ impl Server {
                     self.indexing = None;
                     let message = "Workspace indexing failed unexpectedly".to_owned();
                     eprintln!("papyrus-language-server: {message}");
+                    self.indexing_error = Some(IndexingRequestError {
+                        code: ErrorCode::InternalError as i32,
+                        message: message.clone(),
+                    });
                     self.progress_finished = Some(message.clone());
                     if self.progress_active {
                         send_progress(
@@ -222,15 +235,25 @@ impl Server {
                             }
                             self.workspace = workspace;
                             self.dirty_disk_uris.clear();
+                            indexing_succeeded = true;
                             "Workspace indexing complete".to_owned()
                         }
                         Err(error) if error == "workspace indexing cancelled" => {
+                            self.indexing_error = Some(IndexingRequestError {
+                                code: ErrorCode::ServerCancelled as i32,
+                                message: "Workspace indexing was cancelled; index-dependent requests cannot be completed."
+                                    .to_owned(),
+                            });
                             "Workspace indexing cancelled".to_owned()
                         }
                         Err(error) => {
                             eprintln!(
                                 "papyrus-language-server: workspace indexing failed: {error}"
                             );
+                            self.indexing_error = Some(IndexingRequestError {
+                                code: ErrorCode::InternalError as i32,
+                                message: format!("Workspace indexing failed: {error}"),
+                            });
                             format!("Workspace indexing failed: {error}")
                         }
                     };
@@ -251,9 +274,17 @@ impl Server {
                 }
             }
         }
-        if indexing_finished {
+        if indexing_succeeded {
             for request in std::mem::take(&mut self.pending_index_requests) {
                 self.handle_request(connection, request)?;
+            }
+        } else if indexing_finished && let Some(error) = &self.indexing_error {
+            for request in std::mem::take(&mut self.pending_index_requests) {
+                connection.sender.send(Message::Response(Response::new_err(
+                    request.id,
+                    error.code,
+                    error.message.clone(),
+                )))?;
             }
         }
         Ok(())
@@ -311,17 +342,27 @@ impl Server {
                 }
             };
         }
-        if self.indexing.is_some() && requires_complete_index(&request.method) {
-            if self.pending_index_requests.len() >= MAX_PENDING_INDEX_REQUESTS {
+        if requires_complete_index(&request.method) {
+            if let Some(error) = &self.indexing_error {
                 connection.sender.send(Message::Response(Response::new_err(
                     request.id,
-                    ErrorCode::ServerCancelled as i32,
-                    "Workspace indexing is still in progress; retry this request.".to_owned(),
+                    error.code,
+                    error.message.clone(),
                 )))?;
-            } else {
-                self.pending_index_requests.push(request);
+                return Ok(());
             }
-            return Ok(());
+            if self.indexing.is_some() {
+                if self.pending_index_requests.len() >= MAX_PENDING_INDEX_REQUESTS {
+                    connection.sender.send(Message::Response(Response::new_err(
+                        request.id,
+                        ErrorCode::ServerCancelled as i32,
+                        "Workspace indexing is still in progress; retry this request.".to_owned(),
+                    )))?;
+                } else {
+                    self.pending_index_requests.push(request);
+                }
+                return Ok(());
+            }
         }
         let started = Instant::now();
         let method = request.method.clone();

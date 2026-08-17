@@ -152,36 +152,47 @@ impl WorkspaceIndex {
             );
             return DiskIndexResult::Indexed(byte_count);
         }
-        self.index_text(uri, Some(path.to_owned()), priority, &text);
+        self.index_text(uri, Some(path.to_owned()), priority, &text, true);
         DiskIndexResult::Indexed(byte_count)
     }
 
     fn path_priority(&self, path: &Path) -> u8 {
         if self
             .config
-            .source_roots
-            .iter()
-            .any(|root| path.starts_with(root))
-        {
-            1
-        } else if self
-            .config
             .import_directories
             .iter()
             .any(|root| path.starts_with(root))
         {
             2
+        } else if self
+            .config
+            .discovered_import_directories
+            .iter()
+            .any(|root| path.starts_with(root))
+        {
+            3
+        } else if self
+            .config
+            .source_roots
+            .iter()
+            .any(|root| path.starts_with(root))
+        {
+            1
         } else {
             3
         }
     }
 
     pub(crate) fn overlay(&mut self, uri: Uri, text: &str) {
-        let path = self
-            .documents
-            .get(&uri)
-            .and_then(|entry| entry.path.clone());
-        self.index_text(uri, path, 0, text);
+        let existing = self.documents.get(&uri);
+        let path = existing
+            .and_then(|entry| entry.path.clone())
+            .or_else(|| self.workspace_path(&uri));
+        let priority = existing
+            .map(|entry| entry.priority)
+            .or_else(|| path.as_deref().map(|path| self.path_priority(path)))
+            .unwrap_or(0);
+        self.index_text(uri, path, priority, text, false);
         self.rebuild_lookups();
     }
 
@@ -206,13 +217,18 @@ impl WorkspaceIndex {
             .then_some(path)
     }
 
-    fn index_text(&mut self, uri: Uri, path: Option<PathBuf>, priority: u8, text: &str) {
+    fn index_text(
+        &mut self,
+        uri: Uri,
+        path: Option<PathBuf>,
+        priority: u8,
+        text: &str,
+        cache: bool,
+    ) {
         let content_hash = normalized_content_hash(text);
         let semantic = self.semantic_extractor.extract(uri.clone(), text);
         let symbols = semantic.symbols.clone();
-        if priority > 0
-            && let Some(cache_path) = path.as_deref()
-        {
+        if cache && let Some(cache_path) = path.as_deref() {
             self.index_cache.insert(
                 cache_path,
                 &CachedDocument {
@@ -302,7 +318,8 @@ impl WorkspaceIndex {
         {
             self.resolve_visible_name(current, &receiver, offset)
                 .and_then(|declaration| declaration.ty.as_ref())
-                .map(|ty| self.members_of_type(current, &ty.name))
+                .and_then(|ty| ty.scalar_name())
+                .map(|ty| self.members_of_type(current, ty))
                 .or_else(|| {
                     self.unique_script(&receiver)
                         .map(|(_, script)| self.members_of(script))
@@ -422,10 +439,17 @@ fn receiver_before_dot(text: &str, offset: usize) -> Option<String> {
         index -= 1;
     }
     let end = index;
-    while index > 0 && is_identifier(bytes[index - 1]) {
+    while index > 0 && (is_identifier(bytes[index - 1]) || bytes[index - 1] == b':') {
         index -= 1;
     }
-    (index < end).then(|| text[index..end].to_owned())
+    let receiver = &text[index..end];
+    is_qualified_identifier(receiver).then(|| receiver.to_owned())
+}
+
+fn is_qualified_identifier(value: &str) -> bool {
+    value
+        .split(':')
+        .all(|segment| !segment.is_empty() && segment.bytes().all(is_identifier))
 }
 
 fn is_identifier(byte: u8) -> bool {
@@ -567,6 +591,90 @@ mod tests {
     }
 
     #[test]
+    fn resolves_grouped_properties_and_rejects_array_element_members() {
+        let root = temp_root("grouped-and-array-members");
+        let actor_path = root.join("Actor.psc");
+        fs::write(
+            &actor_path,
+            concat!(
+                "ScriptName Actor\n",
+                "Group Configuration\n",
+                "  Bool Property Grouped Auto\n",
+                "EndGroup\n",
+                "Function Jump()\n",
+                "EndFunction\n",
+            ),
+        )
+        .unwrap();
+        fs::write(root.join("Child.psc"), "ScriptName Child Extends Actor\n").unwrap();
+        let project_path = root.join("Project.psc");
+        fs::write(
+            &project_path,
+            concat!(
+                "ScriptName Project\n",
+                "Child Target\n",
+                "Child[] Targets\n",
+                "Function Test()\n",
+                "  Target.\n",
+                "  Target.Grouped\n",
+                "  Targets.\n",
+                "  Targets.Jump()\n",
+                "EndFunction\n",
+            ),
+        )
+        .unwrap();
+        let index = WorkspaceIndex::new(&WorkspaceConfig {
+            source_roots: vec![root.clone()],
+            ..WorkspaceConfig::default()
+        })
+        .unwrap();
+        let project_uri = path_to_file_uri(&project_path).unwrap();
+
+        let target_members = index.completion(&project_uri, Position::new(4, 9));
+        assert!(target_members.iter().any(|item| item.label == "Grouped"));
+        assert!(target_members.iter().any(|item| item.label == "Jump"));
+        assert_eq!(
+            index
+                .definition(&project_uri, Position::new(5, 11))
+                .unwrap()
+                .uri,
+            path_to_file_uri(&actor_path).unwrap()
+        );
+
+        assert!(
+            index
+                .completion(&project_uri, Position::new(6, 10))
+                .is_empty()
+        );
+        assert!(index.hover(&project_uri, Position::new(7, 12)).is_none());
+        assert!(
+            index
+                .definition(&project_uri, Position::new(7, 12))
+                .is_none()
+        );
+        assert!(
+            index
+                .signature_help(&project_uri, Position::new(7, 15))
+                .is_none()
+        );
+        assert!(
+            index
+                .prepare_rename(&project_uri, Position::new(7, 12), false)
+                .is_none()
+        );
+        assert!(
+            index
+                .references(
+                    &path_to_file_uri(&actor_path).unwrap(),
+                    Position::new(4, 10),
+                    false,
+                )
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn hover_and_definition_share_the_resolved_member() {
         let root = temp_root("definition");
         let actor_path = root.join("Actor.psc");
@@ -679,6 +787,50 @@ mod tests {
             index
                 .definition(&project_uri, Position::new(3, 9))
                 .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn opening_a_nested_import_preserves_project_source_precedence() {
+        let root = temp_root("overlay-priority");
+        let project_root = root.join("project");
+        let import_root = project_root.join("vendor");
+        fs::create_dir_all(&import_root).unwrap();
+        let project_shared = project_root.join("Shared.psc");
+        let imported_shared = import_root.join("Shared.psc");
+        fs::write(
+            &project_shared,
+            "ScriptName Shared\nFunction ProjectVersion() Global\nEndFunction\n",
+        )
+        .unwrap();
+        fs::write(
+            &imported_shared,
+            "ScriptName Shared\nFunction ImportVersion() Global\nEndFunction\n",
+        )
+        .unwrap();
+        let mut index = WorkspaceIndex::new(&WorkspaceConfig {
+            source_roots: vec![project_root.clone()],
+            import_directories: vec![import_root],
+            ..WorkspaceConfig::default()
+        })
+        .unwrap();
+        let project_uri = path_to_file_uri(&project_shared).unwrap();
+        let imported_uri = path_to_file_uri(&imported_shared).unwrap();
+
+        assert_eq!(
+            index.unique_script("Shared").unwrap().0.semantic.uri,
+            project_uri
+        );
+        assert_eq!(index.documents.get(&imported_uri).unwrap().priority, 2);
+        index.overlay(
+            imported_uri.clone(),
+            "ScriptName Shared\nFunction UnsavedImportVersion() Global\nEndFunction\n",
+        );
+        assert_eq!(index.documents.get(&imported_uri).unwrap().priority, 2);
+        assert_eq!(
+            index.unique_script("Shared").unwrap().0.semantic.uri,
+            project_uri
         );
         fs::remove_dir_all(root).unwrap();
     }

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{cache_paths::cache_directory, semantic::SemanticDocument};
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const RETAINED_GENERATIONS: usize = 2;
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -452,7 +452,7 @@ mod tests {
         let text = concat!(
             "ScriptName Script\n",
             "Function Target(Int Value)\nEndFunction\n",
-            "Function Test()\n  Target(1)\nEndFunction\n",
+            "Function Test()\n  Target(Value = 1)\nEndFunction\n",
         );
         fs::write(&path, text).unwrap();
         let mut cache = IndexCache::load_from(Some(root.clone()));
@@ -463,6 +463,9 @@ mod tests {
         let document = loaded.get(&path, blake3::hash(text.as_bytes())).unwrap();
         assert!(document.semantic.text.is_empty());
         assert_eq!(document.semantic.call_sites.len(), 1);
+        assert!(document.semantic.occurrences.iter().any(|occurrence| {
+            occurrence.name == "Value" && occurrence.is_named_argument_label
+        }));
         fs::remove_dir_all(root).unwrap();
     }
 

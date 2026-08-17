@@ -210,6 +210,9 @@ impl WorkspaceIndex {
         current: &'a IndexedDocument,
         occurrence: &SemanticOccurrence,
     ) -> Option<&'a Declaration> {
+        if occurrence.is_named_argument_label {
+            return self.resolve_named_argument_parameter(current, occurrence);
+        }
         if let Some(receiver) = &occurrence.receiver {
             return self.resolve_qualified_member(
                 current,
@@ -246,6 +249,46 @@ impl WorkspaceIndex {
             })
     }
 
+    pub(super) fn resolve_named_argument_parameter<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        occurrence: &SemanticOccurrence,
+    ) -> Option<&'a Declaration> {
+        let call = current
+            .semantic
+            .call_sites
+            .iter()
+            .filter(|call| call.contains_offset(occurrence.byte_offset))
+            .filter(|call| {
+                call.argument_at(occurrence.byte_offset)
+                    .and_then(|(_, name)| name)
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&occurrence.name))
+            })
+            .min_by_key(|call| call.argument_span())?;
+        let callee = self.resolve_at(&current.semantic.uri, call.callee_range.start)?;
+        if !matches!(
+            callee.kind,
+            DeclarationKind::Function | DeclarationKind::Event
+        ) {
+            return None;
+        }
+        let (uri, _) = self.declaration_location(callee)?;
+        self.documents
+            .get(&uri)?
+            .semantic
+            .declarations
+            .iter()
+            .find(|declaration| {
+                declaration.kind == DeclarationKind::Parameter
+                    && declaration.name.eq_ignore_ascii_case(&occurrence.name)
+                    && declaration
+                        .container
+                        .as_deref()
+                        .is_some_and(|container| container.eq_ignore_ascii_case(&callee.name))
+                    && declaration.owner_script == callee.owner_script
+            })
+    }
+
     fn resolve_qualified_member<'a>(
         &'a self,
         current: &'a IndexedDocument,
@@ -254,7 +297,7 @@ impl WorkspaceIndex {
         offset: usize,
     ) -> Option<&'a Declaration> {
         if let Some(receiver_declaration) = self.resolve_visible_name(current, receiver, offset) {
-            let ty = &receiver_declaration.ty.as_ref()?.name;
+            let ty = receiver_declaration.ty.as_ref()?.scalar_name()?;
             return unique_named(self.members_of_type(current, ty), member);
         }
         let (document, script) = self.unique_script(receiver)?;
@@ -671,6 +714,51 @@ mod tests {
             "Jump(Int Count, String Label)"
         );
         assert_eq!(incomplete_help.active_parameter, Some(1));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolves_namespaced_script_qualified_global_calls() {
+        let root = temp_root("namespaced-qualified-call");
+        let utility = root.join("Utility.psc");
+        fs::write(
+            &utility,
+            concat!(
+                "ScriptName Venworks:Core:Utility\n",
+                "Function Log(String Text) Global\n",
+                "EndFunction\n",
+            ),
+        )
+        .unwrap();
+        let source = concat!(
+            "ScriptName Project\n",
+            "Function Test()\n",
+            "  Venworks:Core:Utility.Log(\"message\")\n",
+            "EndFunction\n",
+        );
+        let project = root.join("Project.psc");
+        fs::write(&project, source).unwrap();
+        let index = WorkspaceIndex::new(&WorkspaceConfig {
+            source_roots: vec![root.clone()],
+            ..WorkspaceConfig::default()
+        })
+        .unwrap();
+        let project_uri = path_to_file_uri(&project).unwrap();
+        let utility_uri = path_to_file_uri(&utility).unwrap();
+        let log = position_in(source, "Log(\"message\")", 1);
+
+        assert_eq!(
+            index.definition(&project_uri, log).unwrap().uri,
+            utility_uri
+        );
+        assert!(index.hover(&project_uri, log).is_some());
+        let signature = index
+            .signature_help(&project_uri, position_in(source, "\"message\"", 1))
+            .unwrap();
+        assert_eq!(signature.signatures[0].label, "Log(String Text)");
+        let references = index.references(&utility_uri, Position::new(1, 10), false);
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].uri, project_uri);
         fs::remove_dir_all(root).unwrap();
     }
 

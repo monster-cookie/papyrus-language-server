@@ -32,6 +32,7 @@ struct InitializationOptions {
 }
 
 impl WorkspaceConfig {
+    #[allow(deprecated)]
     pub(crate) fn from_initialize(params: &InitializeParams) -> Self {
         let mut config = params
             .initialization_options
@@ -41,14 +42,23 @@ impl WorkspaceConfig {
             .unwrap_or_default();
 
         if config.source_roots.is_empty() {
-            config.source_roots.extend(
-                params
-                    .workspace_folders
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|folder| file_uri_to_path(folder.uri.as_str())),
-            );
+            let workspace_roots = params
+                .workspace_folders
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|folder| file_uri_to_path(folder.uri.as_str()))
+                .collect::<Vec<_>>();
+            if workspace_roots.is_empty() {
+                config.source_roots.extend(
+                    params
+                        .root_uri
+                        .as_ref()
+                        .and_then(|uri| file_uri_to_path(uri.as_str())),
+                );
+            } else {
+                config.source_roots.extend(workspace_roots);
+            }
         }
         deduplicate(&mut config.source_roots);
         deduplicate(&mut config.import_directories);
@@ -190,6 +200,16 @@ mod tests {
         }))
         .unwrap();
         let config = WorkspaceConfig::from_initialize(&workspace);
+        assert_eq!(config.source_roots.len(), 1);
+        assert!(config.source_roots[0].to_string_lossy().contains("My Mod"));
+
+        let legacy: InitializeParams = serde_json::from_value(serde_json::json!({
+            "capabilities": {},
+            "rootUri": workspace_uri,
+            "workspaceFolders": [{ "uri": "https://example.com/ignored", "name": "Ignored" }]
+        }))
+        .unwrap();
+        let config = WorkspaceConfig::from_initialize(&legacy);
         assert_eq!(config.source_roots.len(), 1);
         assert!(config.source_roots[0].to_string_lossy().contains("My Mod"));
     }

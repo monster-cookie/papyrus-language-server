@@ -1,4 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 use lsp_types::{
     DocumentChangeOperation, DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier,
@@ -269,12 +273,10 @@ impl WorkspaceIndex {
     }
 
     fn is_project_document(&self, document: &IndexedDocument) -> bool {
-        document.path.as_deref().is_some_and(|path| {
-            self.config
-                .source_roots
-                .iter()
-                .any(|root| path.starts_with(root))
-        })
+        document
+            .path
+            .as_deref()
+            .is_some_and(|path| self.path_priority(path) == 1)
     }
 
     fn validate_collision(
@@ -358,7 +360,8 @@ impl WorkspaceIndex {
         }
         let new_path = old_path.with_file_name(format!("{new_leaf}.psc"));
         let case_only = old_leaf.eq_ignore_ascii_case(new_leaf);
-        if new_path.exists() && !case_only {
+        if new_path.exists() && !(case_only && existing_destination_is_source(old_path, &new_path))
+        {
             return Err(format!(
                 "Cannot rename the script because `{}` already exists.",
                 new_path.display()
@@ -379,6 +382,19 @@ impl WorkspaceIndex {
     }
 }
 
+fn existing_destination_is_source(source: &Path, destination: &Path) -> bool {
+    if fs::symlink_metadata(destination).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return false;
+    }
+    let Ok(source) = fs::canonicalize(source) else {
+        return false;
+    };
+    let Ok(destination) = fs::canonicalize(destination) else {
+        return false;
+    };
+    source == destination
+}
+
 struct RenamedResolver<'a> {
     workspace: &'a WorkspaceIndex,
     target_document: &'a IndexedDocument,
@@ -392,6 +408,13 @@ impl<'a> RenamedResolver<'a> {
         current: &'a IndexedDocument,
         occurrence: &SemanticOccurrence,
     ) -> Option<&'a Declaration> {
+        if occurrence.is_named_argument_label {
+            let parameter = self
+                .workspace
+                .resolve_named_argument_parameter(current, occurrence)?;
+            return std::ptr::eq(self.workspace.canonical_declaration(parameter), self.target)
+                .then_some(parameter);
+        }
         if let Some(receiver) = &occurrence.receiver {
             return self.resolve_qualified_member(
                 current,
@@ -412,7 +435,7 @@ impl<'a> RenamedResolver<'a> {
         offset: usize,
     ) -> Option<&'a Declaration> {
         if let Some(receiver_declaration) = self.resolve_visible_name(current, receiver, offset) {
-            let ty = &receiver_declaration.ty.as_ref()?.name;
+            let ty = receiver_declaration.ty.as_ref()?.scalar_name()?;
             return self.unique_named(self.members_of_type(current, ty), member);
         }
         let (document, script) = self.unique_script(receiver)?;
@@ -744,6 +767,69 @@ mod tests {
     }
 
     #[test]
+    fn renames_named_parameter_labels_on_namespaced_calls() {
+        let root = temp_root("rename-named-parameter");
+        let utility = root.join("Utility.psc");
+        fs::write(
+            &utility,
+            concat!(
+                "ScriptName Venworks:Core:Utility\n",
+                "Function Run(Int Input) Global\n",
+                "EndFunction\n",
+            ),
+        )
+        .unwrap();
+        let project = root.join("Project.psc");
+        fs::write(
+            &project,
+            concat!(
+                "ScriptName Project\n",
+                "Function Test()\n",
+                "  Venworks:Core:Utility.Run(Input = 1)\n",
+                "EndFunction\n",
+            ),
+        )
+        .unwrap();
+        let config = WorkspaceConfig {
+            source_roots: vec![root.clone()],
+            ..WorkspaceConfig::default()
+        };
+        let index = WorkspaceIndex::new(&config).unwrap();
+
+        let edit = index
+            .rename(
+                &path_to_file_uri(&utility).unwrap(),
+                Position::new(1, 18),
+                "RenamedInput",
+                false,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        let edits = text_edits(&edit);
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().all(|(_, _, text)| text == "RenamedInput"));
+        assert!(edits.iter().any(|(uri, line, _)| {
+            uri == path_to_file_uri(&project).unwrap().as_str() && *line == 2
+        }));
+        drop(index);
+
+        let cached_index = WorkspaceIndex::new(&config).unwrap();
+        let cached_edit = cached_index
+            .rename(
+                &path_to_file_uri(&utility).unwrap(),
+                Position::new(1, 18),
+                "RenamedInput",
+                false,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(text_edits(&cached_edit).len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn renames_inherited_members_imported_globals_and_structs() {
         let root = temp_root("rename-navigation");
         let base = root.join("Base.psc");
@@ -918,6 +1004,40 @@ mod tests {
     }
 
     #[test]
+    fn nested_imports_remain_read_only() {
+        let root = temp_root("rename-nested-import");
+        let project_root = root.join("project");
+        let import_root = project_root.join("vendor");
+        fs::create_dir_all(&import_root).unwrap();
+        let imported = import_root.join("Library.psc");
+        fs::write(
+            &imported,
+            "ScriptName Library\nFunction External()\nEndFunction\n",
+        )
+        .unwrap();
+        let index = WorkspaceIndex::new(&WorkspaceConfig {
+            source_roots: vec![project_root],
+            import_directories: vec![import_root],
+            ..WorkspaceConfig::default()
+        })
+        .unwrap();
+        let uri = path_to_file_uri(&imported).unwrap();
+
+        assert!(
+            index
+                .prepare_rename(&uri, Position::new(1, 10), false)
+                .is_none()
+        );
+        assert!(
+            index
+                .rename(&uri, Position::new(1, 10), "Renamed", false, false)
+                .unwrap_err()
+                .contains("project source roots")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn rejects_a_rename_that_would_rebind_an_edited_reference() {
         let root = temp_root("rename-rebind");
         let path = root.join("Project.psc");
@@ -1059,6 +1179,24 @@ mod tests {
         let rename = file_rename(&case_only).unwrap();
         assert!(rename.old_uri.as_str().ends_with("/Actor.psc"));
         assert!(rename.new_uri.as_str().ends_with("/actor.psc"));
+
+        let occupied_case_variant = namespace.join("actor.psc");
+        if !occupied_case_variant.exists() {
+            fs::write(&occupied_case_variant, "; distinct occupied path\n").unwrap();
+            assert!(
+                index
+                    .rename(
+                        &actor_uri,
+                        Position::new(0, 25),
+                        "Venworks:Core:actor",
+                        true,
+                        true,
+                    )
+                    .unwrap_err()
+                    .contains("already exists")
+            );
+            fs::remove_file(occupied_case_variant).unwrap();
+        }
 
         fs::write(namespace.join("RenamedActor.psc"), "; occupied\n").unwrap();
         assert!(

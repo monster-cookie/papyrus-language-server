@@ -15,7 +15,7 @@
 - Added conservative, workspace-wide find references with scope, inheritance, import, ambiguity, overlay, and identical-alias handling.
 - Added source-derived signature help for positional, named, inherited, imported, script-qualified, nested, and incomplete calls.
 - Added conservative project-source rename with identifier and collision validation, ambiguity safeguards, external-source protection, and same-namespace Papyrus script file renames through LSP workspace edits.
-- Persisted syntax-backed identifier occurrences in semantic cache schema v4 without storing source text.
+- Persisted syntax-backed identifier occurrences in semantic cache schema v6 without storing source text.
 - Split semantic navigation and shared resolution from the workspace indexing and completion module.
 - Moved discovery, bounded scanning, and Starfield source extraction behind initialization onto a cancellable background worker with LSP progress reporting and overlay replay.
 - Hardened semantic and Starfield caches with private platform directories, content verification, resource limits, exclusive staging, and immutable atomic generations.
