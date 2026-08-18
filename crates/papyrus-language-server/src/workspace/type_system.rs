@@ -101,7 +101,13 @@ pub(super) fn binary_result(
         {
             Some(known("Bool"))
         }
-        SemanticBinaryOperator::Add if is_string(left) || is_string(right) => Some(known("String")),
+        SemanticBinaryOperator::Add
+            if !matches!(left, ValueType::Void)
+                && !matches!(right, ValueType::Void)
+                && (is_string(left) || is_string(right)) =>
+        {
+            Some(known("String"))
+        }
         SemanticBinaryOperator::Add
         | SemanticBinaryOperator::Subtract
         | SemanticBinaryOperator::Multiply

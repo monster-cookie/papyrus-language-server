@@ -392,7 +392,12 @@ fn validate_expression(
         } => {
             let _ = validate_expression(workspace, current, function, issues);
             for argument in arguments {
-                let _ = validate_expression(workspace, current, argument, issues);
+                if matches!(
+                    validate_expression(workspace, current, argument, issues),
+                    inference::Resolution::Resolved(ValueType::Void)
+                ) {
+                    push_void_value(argument.range(), issues);
+                }
             }
             inference::expression_type_outcome(workspace, current, expression, 0)
         }
@@ -456,7 +461,7 @@ fn validate_expression(
         SemanticExpression::Parenthesized { value, .. } => {
             validate_expression(workspace, current, value, issues)
         }
-        SemanticExpression::New { size, .. } => {
+        SemanticExpression::New { ty, size, .. } => {
             if let Some(size) = size {
                 match validate_expression(workspace, current, size, issues) {
                     inference::Resolution::Resolved(ValueType::Void) => {
@@ -475,6 +480,24 @@ fn validate_expression(
                     | inference::Resolution::Missing
                     | inference::Resolution::Ambiguous
                     | inference::Resolution::Unsupported => {}
+                }
+            } else {
+                match workspace.resolve_type_name_outcome(current, &ty.name) {
+                    inference::Resolution::Resolved(declaration)
+                        if declaration.kind == DeclarationKind::Struct => {}
+                    inference::Resolution::Resolved(_) | inference::Resolution::Unsupported => {
+                        issues.push(SemanticIssue {
+                            range: expression.range(),
+                            code: "invalid-new-target",
+                            message: format!(
+                                "New without an array size requires a struct type, not {}",
+                                ty.display()
+                            ),
+                        });
+                        return inference::Resolution::Unsupported;
+                    }
+                    inference::Resolution::Missing => return inference::Resolution::Missing,
+                    inference::Resolution::Ambiguous => return inference::Resolution::Ambiguous,
                 }
             }
             inference::expression_type_outcome(workspace, current, expression, 0)
@@ -788,6 +811,23 @@ mod tests {
         fs::write(root.join("Child.psc"), "ScriptName Child Extends Parent\n").unwrap();
         let source = concat!(
             "ScriptName Project\n",
+            "Struct Payload\n",
+            "  Int Value\n",
+            "EndStruct\n",
+            "Group Settings\n",
+            "  Bool Property Enabled Auto\n",
+            "EndGroup\n",
+            "Int Property Writable\n",
+            "  Int Function Get()\n",
+            "    Return 1\n",
+            "  EndFunction\n",
+            "  Function Set(Int Value)\n",
+            "  EndFunction\n",
+            "EndProperty\n",
+            "State Active\n",
+            "  Function StateOnly()\n",
+            "  EndFunction\n",
+            "EndState\n",
             "Child ChildValue\n",
             "Int Count = 1\n",
             "Float Ratio = Count\n",
@@ -798,10 +838,13 @@ mod tests {
             "Parent Upcast = ChildValue\n",
             "Parent EmptyValue = None\n",
             "Int[] Numbers = New Int[3]\n",
+            "Payload Data = New Payload\n",
             "Int Function Calculate()\n",
             "  Count += 1\n",
             "  Ratio = Count + 0.5\n",
             "  Numbers[0] = Count\n",
+            "  Writable = Count\n",
+            "  StateOnly()\n",
             "  If ChildValue && Count\n",
             "  ElseIf Text\n",
             "    While Numbers\n",
@@ -833,8 +876,16 @@ mod tests {
             "ScriptName Project\n",
             "Int ReadOnly = 1 Const\n",
             "Int Property Fixed = 1 AutoReadOnly\n",
+            "Int Property GetterOnly\n",
+            "  Int Function Get()\n",
+            "    Return 1\n",
+            "  EndFunction\n",
+            "EndProperty\n",
             "Int[] Values\n",
+            "String Text\n",
             "Function NoValue()\n",
+            "EndFunction\n",
+            "Function Consume(Int Value)\n",
             "EndFunction\n",
             "Int Function WrongReturn()\n",
             "  Return \"bad\"\n",
@@ -851,6 +902,7 @@ mod tests {
             "  Count = \"bad\"\n",
             "  ReadOnly = 2\n",
             "  Fixed = 2\n",
+            "  GetterOnly = 2\n",
             "  Values[0] += 1\n",
             "  Count %= 2.0\n",
             "  Count = -\"bad\"\n",
@@ -858,7 +910,12 @@ mod tests {
             "  Count = Values[\"bad\"]\n",
             "  Count = Count[0]\n",
             "  Count = NoValue()\n",
+            "  Consume(NoValue())\n",
+            "  Text = \"result: \" + NoValue()\n",
+            "  Text = NoValue() + \"result\"\n",
             "  Int[] Other = New Int[\"bad\"]\n",
+            "  Actor InvalidNew = New Actor\n",
+            "  Int InvalidPrimitiveNew = New Int\n",
             "  Actor InvalidCast = 1 As Actor\n",
             "  Bool InvalidTest = 1 Is Actor\n",
             "  If NoValue()\n",
@@ -894,6 +951,7 @@ mod tests {
             "invalid-subscript-target",
             "void-value-use",
             "invalid-array-size",
+            "invalid-new-target",
             "invalid-cast",
             "invalid-type-test",
             "invalid-condition",
@@ -907,6 +965,27 @@ mod tests {
             codes
                 .iter()
                 .filter(|code| code.as_str() == "invalid-assignment-target")
+                .count(),
+            3
+        );
+        assert_eq!(
+            codes
+                .iter()
+                .filter(|code| code.as_str() == "invalid-new-target")
+                .count(),
+            2
+        );
+        assert_eq!(
+            codes
+                .iter()
+                .filter(|code| code.as_str() == "invalid-binary-operands")
+                .count(),
+            4
+        );
+        assert_eq!(
+            codes
+                .iter()
+                .filter(|code| code.as_str() == "void-value-use")
                 .count(),
             2
         );

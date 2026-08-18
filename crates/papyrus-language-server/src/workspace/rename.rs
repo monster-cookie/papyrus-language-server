@@ -532,16 +532,7 @@ impl<'a> RenamedResolver<'a> {
                 break;
             };
             for declaration in &document.semantic.declarations {
-                if declaration
-                    .owner_script
-                    .as_deref()
-                    .is_some_and(|owner| owner.eq_ignore_ascii_case(&resolved_script.name))
-                    && declaration.container.is_none()
-                    && !matches!(
-                        declaration.kind,
-                        DeclarationKind::Script | DeclarationKind::Parameter
-                    )
-                    && !declaration.is_global
+                if self.is_script_member(document, declaration, &resolved_script.name)
                     && !members.iter().any(|existing: &&Declaration| {
                         self.declaration_name(existing)
                             .eq_ignore_ascii_case(self.declaration_name(declaration))
@@ -553,6 +544,37 @@ impl<'a> RenamedResolver<'a> {
             current = document.semantic.parent_script.clone();
         }
         members
+    }
+
+    fn is_script_member(
+        &self,
+        document: &IndexedDocument,
+        declaration: &Declaration,
+        script_name: &str,
+    ) -> bool {
+        declaration
+            .owner_script
+            .as_deref()
+            .is_some_and(|owner| owner.eq_ignore_ascii_case(script_name))
+            && !matches!(
+                declaration.kind,
+                DeclarationKind::Script | DeclarationKind::Parameter
+            )
+            && !declaration.is_global
+            && (declaration.container.is_none() || self.is_state_callable(document, declaration))
+    }
+
+    fn is_state_callable(&self, document: &IndexedDocument, declaration: &Declaration) -> bool {
+        matches!(
+            declaration.kind,
+            DeclarationKind::Function | DeclarationKind::Event
+        ) && declaration.container.as_deref().is_some_and(|container| {
+            document.semantic.declarations.iter().any(|candidate| {
+                candidate.kind == DeclarationKind::State
+                    && candidate.container.is_none()
+                    && candidate.name.eq_ignore_ascii_case(container)
+            })
+        })
     }
 
     fn members_of_type(
@@ -849,6 +871,10 @@ mod tests {
                 "ScriptName Actor Extends Base\n",
                 "Actor Function Companion()\n",
                 "EndFunction\n",
+                "State Active\n",
+                "  Function StateAction()\n",
+                "  EndFunction\n",
+                "EndState\n",
             ),
         )
         .unwrap();
@@ -880,6 +906,7 @@ mod tests {
                 "  Target.Jump()\n",
                 "  Source.GetActor().Jump()\n",
                 "  Target.Companion().Companion().Jump()\n",
+                "  Target.StateAction()\n",
                 "  Log()\n",
                 "EndFunction\n",
             ),
@@ -914,6 +941,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(text_edits(&companion).len(), 3);
+
+        let state_action = index
+            .rename(
+                &path_to_file_uri(&actor).unwrap(),
+                Position::new(4, 12),
+                "StateChange",
+                false,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(text_edits(&state_action).len(), 2);
 
         let log = index
             .rename(

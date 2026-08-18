@@ -576,16 +576,7 @@ impl WorkspaceIndex {
                 break;
             };
             for declaration in &document.semantic.declarations {
-                if declaration
-                    .owner_script
-                    .as_deref()
-                    .is_some_and(|owner| owner.eq_ignore_ascii_case(&name))
-                    && declaration.container.is_none()
-                    && !matches!(
-                        declaration.kind,
-                        DeclarationKind::Script | DeclarationKind::Parameter
-                    )
-                    && !declaration.is_global
+                if is_script_member(document, declaration, &name)
                     && !members.iter().any(|existing: &&Declaration| {
                         existing.name.eq_ignore_ascii_case(&declaration.name)
                     })
@@ -617,16 +608,7 @@ impl WorkspaceIndex {
                 }
             };
             for declaration in &document.semantic.declarations {
-                if declaration
-                    .owner_script
-                    .as_deref()
-                    .is_some_and(|owner| owner.eq_ignore_ascii_case(&name))
-                    && declaration.container.is_none()
-                    && !matches!(
-                        declaration.kind,
-                        DeclarationKind::Script | DeclarationKind::Parameter
-                    )
-                    && !declaration.is_global
+                if is_script_member(document, declaration, &name)
                     && !members.iter().any(|existing: &&Declaration| {
                         existing.name.eq_ignore_ascii_case(&declaration.name)
                     })
@@ -858,6 +840,36 @@ fn navigation_key(document: &IndexedDocument) -> (bool, String) {
         path.to_ascii_lowercase().contains("/staging/"),
         path.to_ascii_lowercase(),
     )
+}
+
+fn is_script_member(
+    document: &IndexedDocument,
+    declaration: &Declaration,
+    script_name: &str,
+) -> bool {
+    declaration
+        .owner_script
+        .as_deref()
+        .is_some_and(|owner| owner.eq_ignore_ascii_case(script_name))
+        && !matches!(
+            declaration.kind,
+            DeclarationKind::Script | DeclarationKind::Parameter
+        )
+        && !declaration.is_global
+        && (declaration.container.is_none() || is_state_callable(document, declaration))
+}
+
+fn is_state_callable(document: &IndexedDocument, declaration: &Declaration) -> bool {
+    matches!(
+        declaration.kind,
+        DeclarationKind::Function | DeclarationKind::Event
+    ) && declaration.container.as_deref().is_some_and(|container| {
+        document.semantic.declarations.iter().any(|candidate| {
+            candidate.kind == DeclarationKind::State
+                && candidate.container.is_none()
+                && candidate.name.eq_ignore_ascii_case(container)
+        })
+    })
 }
 
 fn unique_named<'a>(declarations: Vec<&'a Declaration>, name: &str) -> Option<&'a Declaration> {

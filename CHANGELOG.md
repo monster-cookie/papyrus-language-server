@@ -8,6 +8,7 @@
 - Persisted structured expression receivers in semantic cache schema v7 without storing source text.
 - Persisted occurrence roles, parameter-default metadata, call completeness, and argument diagnostic ranges in semantic cache schema v8.
 - Persisted spanned expression trees and statement-level type-check sites in semantic cache schema v9.
+- Invalidated semantic cache schema v9 with v10 so corrected group-label filtering and getter-only property writability are rebuilt.
 
 ## Version 0.2.0 (August 16th, 2026)
 

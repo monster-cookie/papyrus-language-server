@@ -629,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_grouped_properties_and_rejects_array_element_members() {
+    fn resolves_grouped_and_state_members_and_rejects_array_element_members() {
         let root = temp_root("grouped-and-array-members");
         let actor_path = root.join("Actor.psc");
         fs::write(
@@ -641,6 +641,10 @@ mod tests {
                 "EndGroup\n",
                 "Function Jump()\n",
                 "EndFunction\n",
+                "State Active\n",
+                "  Function StateAction()\n",
+                "  EndFunction\n",
+                "EndState\n",
             ),
         )
         .unwrap();
@@ -655,6 +659,7 @@ mod tests {
                 "Function Test()\n",
                 "  Target.\n",
                 "  Target.Grouped\n",
+                "  Target.StateAction()\n",
                 "  Targets.\n",
                 "  Targets.Jump()\n",
                 "EndFunction\n",
@@ -671,6 +676,11 @@ mod tests {
         let target_members = index.completion(&project_uri, Position::new(4, 9));
         assert!(target_members.iter().any(|item| item.label == "Grouped"));
         assert!(target_members.iter().any(|item| item.label == "Jump"));
+        assert!(
+            target_members
+                .iter()
+                .any(|item| item.label == "StateAction")
+        );
         assert_eq!(
             index
                 .definition(&project_uri, Position::new(5, 11))
@@ -678,26 +688,31 @@ mod tests {
                 .uri,
             path_to_file_uri(&actor_path).unwrap()
         );
+        let state_definition = index
+            .definition(&project_uri, Position::new(6, 13))
+            .unwrap();
+        assert_eq!(state_definition.uri, path_to_file_uri(&actor_path).unwrap());
+        assert_eq!(state_definition.range.start.line, 7);
 
         assert!(
             index
-                .completion(&project_uri, Position::new(6, 10))
+                .completion(&project_uri, Position::new(7, 10))
                 .is_empty()
         );
-        assert!(index.hover(&project_uri, Position::new(7, 12)).is_none());
+        assert!(index.hover(&project_uri, Position::new(8, 12)).is_none());
         assert!(
             index
-                .definition(&project_uri, Position::new(7, 12))
+                .definition(&project_uri, Position::new(8, 12))
                 .is_none()
         );
         assert!(
             index
-                .signature_help(&project_uri, Position::new(7, 15))
+                .signature_help(&project_uri, Position::new(8, 15))
                 .is_none()
         );
         assert!(
             index
-                .prepare_rename(&project_uri, Position::new(7, 12), false)
+                .prepare_rename(&project_uri, Position::new(8, 12), false)
                 .is_none()
         );
         assert!(

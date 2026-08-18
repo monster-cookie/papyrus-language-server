@@ -411,9 +411,10 @@ fn collect_occurrences(
 ) {
     if matches!(node.kind(), "identifier" | "qualified_identifier") {
         let selection_range = index.range(source, node.byte_range());
-        if declarations
-            .iter()
-            .any(|declaration| declaration.selection_range == selection_range)
+        if is_group_declaration_name(node)
+            || declarations
+                .iter()
+                .any(|declaration| declaration.selection_range == selection_range)
         {
             return;
         }
@@ -479,6 +480,15 @@ fn collect_member_accesses(
 fn is_named_argument_label(node: Node<'_>) -> bool {
     node.parent().is_some_and(|parent| {
         parent.kind() == "argument"
+            && parent
+                .child_by_field_name("name")
+                .is_some_and(|name| name.id() == node.id())
+    })
+}
+
+fn is_group_declaration_name(node: Node<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "group_declaration"
             && parent
                 .child_by_field_name("name")
                 .is_some_and(|name| name.id() == node.id())
@@ -645,7 +655,8 @@ fn declaration(
     let is_const = has_named_child(node, "const");
     let is_read_only = is_const
         || field_text(node, "kind", source)
-            .is_some_and(|kind| kind.eq_ignore_ascii_case("AutoReadOnly"));
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("AutoReadOnly"))
+        || (node.kind() == "property_definition" && !has_property_setter(node, source));
     Some(Declaration {
         name,
         kind,
@@ -666,6 +677,16 @@ fn has_named_child(node: Node<'_>, kind: &str) -> bool {
     let mut cursor = node.walk();
     node.children(&mut cursor)
         .any(|child| child.kind().eq_ignore_ascii_case(kind))
+}
+
+fn has_property_setter(node: Node<'_>, source: &str) -> bool {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).any(|child| {
+        matches!(
+            child.kind(),
+            "function_definition" | "native_function_declaration"
+        ) && field_text(child, "name", source).is_some_and(|name| name.eq_ignore_ascii_case("Set"))
+    })
 }
 
 fn type_ref(node: Node<'_>, source: &str) -> Option<TypeRef> {
@@ -755,6 +776,18 @@ mod tests {
             "Import Venworks:Core:Logging\n",
             "Int CONST_Value = 1 Const\n",
             "Function LogSystem() Global\nEndFunction\n",
+            "Int Property ReadOnlyValue\n",
+            "  Int Function Get()\n",
+            "    Return 1\n",
+            "  EndFunction\n",
+            "EndProperty\n",
+            "Int Property WritableValue\n",
+            "  Int Function Get()\n",
+            "    Return 1\n",
+            "  EndFunction\n",
+            "  Function Set(Int Value)\n",
+            "  EndFunction\n",
+            "EndProperty\n",
         );
         let document = SemanticExtractor::new()
             .unwrap()
@@ -771,6 +804,18 @@ mod tests {
                 .declarations
                 .iter()
                 .any(|item| item.name == "LogSystem" && item.is_global)
+        );
+        assert!(
+            document
+                .declarations
+                .iter()
+                .any(|item| item.name == "ReadOnlyValue" && item.is_read_only)
+        );
+        assert!(
+            document
+                .declarations
+                .iter()
+                .any(|item| item.name == "WritableValue" && !item.is_read_only)
         );
     }
 
@@ -850,6 +895,12 @@ mod tests {
             .find(|declaration| declaration.name == "Enabled")
             .unwrap();
         assert_eq!(property.container, None);
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.name == "Configuration")
+        );
         let group = document
             .symbols
             .iter()

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{cache_paths::cache_directory, semantic::SemanticDocument};
 
-const SCHEMA_VERSION: u32 = 9;
+const SCHEMA_VERSION: u32 = 10;
 const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const RETAINED_GENERATIONS: usize = 2;
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
