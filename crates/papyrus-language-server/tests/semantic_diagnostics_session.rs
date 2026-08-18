@@ -91,7 +91,7 @@ fn publishes_semantic_diagnostics_and_revalidates_overlays() {
         BTreeMap::from([("unresolved-reference".to_owned(), vec![3])])
     );
 
-    let helper_uri = path_uri(&fixture.helper);
+    let helper_uri = localhost_path_uri(&fixture.helper);
     let helper_overlay = concat!(
         "ScriptName Helper\n",
         "Function Help() Global\n",
@@ -105,6 +105,17 @@ fn publishes_semantic_diagnostics_and_revalidates_overlays() {
     let unresolved_again = receive_diagnostics_for(&client, &overlay_project_uri, Some(1));
     assert_eq!(
         diagnostic_codes(&unresolved_again),
+        BTreeMap::from([("unresolved-reference".to_owned(), vec![3])])
+    );
+
+    change_document(&client, &helper_uri, 3, helper_overlay);
+    let resolved_again = receive_diagnostics_for(&client, &overlay_project_uri, Some(1));
+    assert_eq!(resolved_again["diagnostics"], json!([]));
+
+    close_document(&client, &helper_uri);
+    let unresolved_after_close = receive_diagnostics_for(&client, &overlay_project_uri, Some(1));
+    assert_eq!(
+        diagnostic_codes(&unresolved_after_close),
         BTreeMap::from([("unresolved-reference".to_owned(), vec![3])])
     );
 
@@ -248,6 +259,16 @@ fn change_document(connection: &Connection, uri: &str, version: i32, text: &str)
         .unwrap();
 }
 
+fn close_document(connection: &Connection, uri: &str) {
+    connection
+        .sender
+        .send(Message::Notification(Notification::new(
+            "textDocument/didClose".to_owned(),
+            json!({ "textDocument": { "uri": uri } }),
+        )))
+        .unwrap();
+}
+
 fn receive_diagnostics_for(connection: &Connection, uri: &str, version: Option<i32>) -> Value {
     loop {
         let message = connection
@@ -307,6 +328,15 @@ fn stop_server(client: Connection, server_thread: ServerThread, request_id: i32)
 
 fn path_uri(path: &Path) -> String {
     format!("file:///{}", path.to_string_lossy().replace('\\', "/"))
+}
+
+fn localhost_path_uri(path: &Path) -> String {
+    format!(
+        "file://localhost/{}",
+        path.to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+    )
 }
 
 struct Fixture {

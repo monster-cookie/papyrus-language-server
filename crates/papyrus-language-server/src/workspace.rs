@@ -65,8 +65,18 @@ impl WorkspaceIndex {
     }
 
     pub(crate) fn empty(config: &WorkspaceConfig) -> Result<Self, String> {
+        let mut config = config.clone();
+        for root in &mut config.source_roots {
+            *root = canonical_workspace_path(root);
+        }
+        for root in &mut config.import_directories {
+            *root = canonical_workspace_path(root);
+        }
+        for root in &mut config.discovered_import_directories {
+            *root = canonical_workspace_path(root);
+        }
         Ok(Self {
-            config: config.clone(),
+            config,
             documents: HashMap::new(),
             semantic_extractor: SemanticExtractor::new()?,
             scripts_by_name: HashMap::new(),
@@ -114,16 +124,17 @@ impl WorkspaceIndex {
         {
             return DiskIndexResult::Ignored;
         }
-        let Some(uri) = path_to_file_uri(path) else {
+        let path = canonical_workspace_path(path);
+        let Some(uri) = path_to_file_uri_lexical(&path) else {
             return DiskIndexResult::Ignored;
         };
-        let Ok(metadata) = fs::metadata(path) else {
+        let Ok(metadata) = fs::metadata(&path) else {
             return DiskIndexResult::Ignored;
         };
         if metadata.len() > max_bytes {
             return DiskIndexResult::TooLarge;
         }
-        let Ok(file) = File::open(path) else {
+        let Ok(file) = File::open(&path) else {
             return DiskIndexResult::Ignored;
         };
         let mut bytes = Vec::with_capacity(metadata.len().min(max_bytes) as usize);
@@ -139,14 +150,14 @@ impl WorkspaceIndex {
         let byte_count = bytes.len() as u64;
         let text = String::from_utf8_lossy(&bytes);
         let content_hash = normalized_content_hash(&text);
-        let priority = self.path_priority(path);
-        if let Some(mut cached) = self.index_cache.get(path, content_hash) {
+        let priority = self.path_priority(&path);
+        if let Some(mut cached) = self.index_cache.get(&path, content_hash) {
             cached.semantic.uri = uri.clone();
             cached.semantic.text = text.into_owned();
             self.documents.insert(
                 uri,
                 IndexedDocument {
-                    path: Some(path.to_owned()),
+                    path: Some(path),
                     priority,
                     symbols: cached.symbols,
                     semantic: cached.semantic,
@@ -155,11 +166,12 @@ impl WorkspaceIndex {
             );
             return DiskIndexResult::Indexed(byte_count);
         }
-        self.index_text(uri, Some(path.to_owned()), priority, &text, true);
+        self.index_text(uri, Some(path), priority, &text, true);
         DiskIndexResult::Indexed(byte_count)
     }
 
     fn path_priority(&self, path: &Path) -> u8 {
+        let path = canonical_workspace_path(path);
         if self
             .config
             .import_directories
@@ -187,14 +199,21 @@ impl WorkspaceIndex {
     }
 
     pub(crate) fn overlay(&mut self, uri: Uri, text: &str) {
+        let is_new_uri = !self.documents.contains_key(&uri);
         let existing = self.documents.get(&uri);
         let path = existing
-            .and_then(|entry| entry.path.clone())
+            .and_then(|document| document.path.clone())
             .or_else(|| self.workspace_path(&uri));
         let priority = existing
-            .map(|entry| entry.priority)
+            .filter(|document| document.path.is_some())
+            .map(|document| document.priority)
             .or_else(|| path.as_deref().map(|path| self.path_priority(path)))
             .unwrap_or(0);
+        if is_new_uri && let Some(path) = path.as_ref() {
+            self.documents.retain(|existing_uri, document| {
+                existing_uri == &uri || document.path.as_ref() != Some(path)
+            });
+        }
         self.index_text(uri, path, priority, text, false);
         self.rebuild_lookups();
     }
@@ -213,7 +232,7 @@ impl WorkspaceIndex {
     }
 
     fn workspace_path(&self, uri: &Uri) -> Option<PathBuf> {
-        let path = crate::config::file_uri_to_path(uri.as_str())?;
+        let path = canonical_workspace_path(&crate::config::file_uri_to_path(uri.as_str())?);
         self.config
             .roots()
             .any(|root| path.starts_with(root))
@@ -489,8 +508,30 @@ fn is_papyrus_file(path: &Path) -> bool {
 }
 
 fn path_to_file_uri(path: &Path) -> Option<Uri> {
-    let absolute = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    let absolute = canonical_workspace_path(path);
     path_to_file_uri_lexical(&absolute)
+}
+
+fn canonical_workspace_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    while let Some(name) = ancestor.file_name() {
+        suffix.push(name.to_owned());
+        let Some(parent) = ancestor.parent() else {
+            break;
+        };
+        ancestor = parent;
+        if let Ok(mut canonical) = fs::canonicalize(ancestor) {
+            for component in suffix.into_iter().rev() {
+                canonical.push(component);
+            }
+            return canonical;
+        }
+    }
+    path.to_owned()
 }
 
 fn path_to_file_uri_lexical(path: &Path) -> Option<Uri> {
