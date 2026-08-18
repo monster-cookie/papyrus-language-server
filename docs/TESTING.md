@@ -17,9 +17,9 @@ Rust tests verify:
 - UTF-8 byte offsets convert to UTF-16 LSP positions;
 - diagnostics are published for an unsaved open buffer;
 - a full-text change that inserts the missing closer clears the diagnostic;
-- conservative semantic diagnostics report exact unresolved-reference, unresolved-type, unresolved-member, invalid-call-target, unknown-named-argument, duplicate-named-argument, too-many-arguments, and missing-required-argument codes and ranges;
+- semantic diagnostics report exact unresolved and ambiguous reference/type/member, invalid-call-target, argument-binding, assignment, initializer, return, operator, cast, type-test, array, basic control-condition, and void-value-use codes and ranges;
 - semantic diagnostics clear after an unsaved repair, revalidate dependent open documents after another overlay changes, and survive a semantic-cache restart;
-- ambiguous scripts, incomplete inheritance, unresolved receiver chains, incomplete calls, and syntax-invalid documents suppress speculative or cascading semantic diagnostics;
+- ambiguous scripts produce diagnostics without selecting a target, while incomplete inheritance, unresolved receiver chains, incomplete calls, and syntax-invalid documents suppress derivative or cascading claims;
 - recursive workspace indexing accepts case-insensitive `.psc` extensions;
 - document and workspace symbols reflect unsaved text;
 - closing an overlaid document restores its disk-backed symbols;
@@ -29,7 +29,8 @@ Rust tests verify:
 - hover and go to definition resolve the same source-derived declaration;
 - signature help maps positional and named arguments to inherited, imported-global, and script-qualified declarations;
 - nested and incomplete calls select the correct signature and active parameter without guessing ambiguous callees;
-- expression inference follows chained function returns, casts, parenthesized values, array elements, and `Self` while preserving conservative ambiguity handling;
+- expression inference covers literals, unary and binary operators, chained function returns, casts, type tests, parenthesized values, array construction and elements, `Self`, and `Parent` while preserving conservative navigation behavior;
+- assignment, initializer, return, compound-assignment, operator, cast, type-test, array, and `If`/`ElseIf`/`While` checks honor Papyrus implicit conversions, reject invalid operands and value use, clear after unsaved repair, and persist through semantic-cache restarts;
 - script-qualified global calls resolve their script and global function while preserving variable shadowing and project-source precedence;
 - find references honors declaration inclusion, local scopes, parameters, inherited members, imported globals and structs, and conservative ambiguity handling;
 - reference extraction excludes declaration names, named-argument labels, comments, and strings;

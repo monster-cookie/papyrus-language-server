@@ -46,7 +46,7 @@ const CLEAN_PROJECT_SOURCE: &str = concat!(
 );
 
 #[test]
-fn publishes_conservative_semantic_diagnostics_and_revalidates_overlays() {
+fn publishes_semantic_diagnostics_and_revalidates_overlays() {
     let fixture = Fixture::new();
     let (client, server_thread) = start_server(&fixture.roots());
     wait_for_workspace_indexing(&client);
@@ -124,6 +124,8 @@ fn assert_semantic_diagnostic_matrix(params: &Value) {
     assert_eq!(
         diagnostic_codes(params),
         BTreeMap::from([
+            ("ambiguous-member".to_owned(), vec![17]),
+            ("ambiguous-type".to_owned(), vec![4]),
             ("duplicate-named-argument".to_owned(), vec![14]),
             ("invalid-call-target".to_owned(), vec![12]),
             ("missing-required-argument".to_owned(), vec![16]),

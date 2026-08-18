@@ -7,8 +7,13 @@ use tree_sitter::{Node, Parser};
 use crate::line_index::LineIndex;
 
 mod expression;
+mod type_checks;
 
-pub(crate) use expression::{SemanticExpression, SemanticMemberAccess};
+pub(crate) use expression::{
+    SemanticBinaryOperator, SemanticExpression, SemanticLiteralKind, SemanticMemberAccess,
+    SemanticUnaryOperator,
+};
+pub(crate) use type_checks::{SemanticAssignmentOperator, SemanticTypeCheck};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct TypeRef {
@@ -58,6 +63,7 @@ pub(crate) struct Declaration {
     pub(crate) scope: ByteRange<usize>,
     pub(crate) documentation: Option<String>,
     pub(crate) is_const: bool,
+    pub(crate) is_read_only: bool,
     pub(crate) is_global: bool,
 }
 
@@ -171,6 +177,7 @@ pub(crate) struct SemanticDocument {
     pub(crate) occurrences: Vec<SemanticOccurrence>,
     pub(crate) call_sites: Vec<SemanticCallSite>,
     pub(crate) member_accesses: Vec<SemanticMemberAccess>,
+    pub(crate) type_checks: Vec<SemanticTypeCheck>,
     pub(crate) symbols: Vec<DocumentSymbol>,
 }
 
@@ -198,6 +205,7 @@ impl SemanticExtractor {
             occurrences: Vec::new(),
             call_sites: Vec::new(),
             member_accesses: Vec::new(),
+            type_checks: Vec::new(),
             symbols: Vec::new(),
         };
         let Some(tree) = self.parser.parse(source, None) else {
@@ -241,7 +249,8 @@ impl SemanticExtractor {
             &document.declarations,
             &mut document.call_sites,
         );
-        collect_member_accesses(root, source, &mut document.member_accesses);
+        collect_member_accesses(root, source, &line_index, &mut document.member_accesses);
+        document.type_checks = type_checks::collect_type_checks(root, source, &line_index);
         document.call_sites.sort_by_key(|call| {
             (
                 call.callee_range.start,
@@ -410,7 +419,7 @@ fn collect_occurrences(
         }
         let kind = occurrence_kind(node);
         let is_named_argument_label = kind == SemanticOccurrenceKind::NamedArgument;
-        let Some(receiver) = occurrence_receiver(node, source) else {
+        let Some(receiver) = occurrence_receiver(node, source, index) else {
             return;
         };
         if let Some(name) = text(node, source) {
@@ -431,7 +440,11 @@ fn collect_occurrences(
     }
 }
 
-fn occurrence_receiver(node: Node<'_>, source: &str) -> Option<Option<SemanticExpression>> {
+fn occurrence_receiver(
+    node: Node<'_>,
+    source: &str,
+    index: &LineIndex,
+) -> Option<Option<SemanticExpression>> {
     let Some(parent) = node.parent() else {
         return Some(None);
     };
@@ -442,17 +455,24 @@ fn occurrence_receiver(node: Node<'_>, source: &str) -> Option<Option<SemanticEx
         return Some(None);
     }
     let object = parent.child_by_field_name("object")?;
-    SemanticExpression::from_node(object, source).map(Some)
+    SemanticExpression::from_node(object, source, index).map(Some)
 }
 
-fn collect_member_accesses(node: Node<'_>, source: &str, output: &mut Vec<SemanticMemberAccess>) {
-    if let Some(access) = SemanticMemberAccess::from_node(node, source) {
+fn collect_member_accesses(
+    node: Node<'_>,
+    source: &str,
+    index: &LineIndex,
+    output: &mut Vec<SemanticMemberAccess>,
+) {
+    if let Some(access) = SemanticMemberAccess::from_node(node, source, index) {
         output.push(access);
     }
-    output.extend(SemanticMemberAccess::recover_from_children(node, source));
+    output.extend(SemanticMemberAccess::recover_from_children(
+        node, source, index,
+    ));
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_member_accesses(child, source, output);
+        collect_member_accesses(child, source, index, output);
     }
 }
 
@@ -622,6 +642,10 @@ fn declaration(
                 .collect()
         })
         .unwrap_or_default();
+    let is_const = has_named_child(node, "const");
+    let is_read_only = is_const
+        || field_text(node, "kind", source)
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("AutoReadOnly"));
     Some(Declaration {
         name,
         kind,
@@ -632,7 +656,8 @@ fn declaration(
         selection_range: index.range(source, name_node.byte_range()),
         scope,
         documentation: preceding_documentation(node, source),
-        is_const: has_named_child(node, "const"),
+        is_const,
+        is_read_only,
         is_global: has_named_child(node, "global"),
     })
 }
@@ -679,7 +704,10 @@ mod tests {
 
     use lsp_types::Uri;
 
-    use super::{DeclarationKind, SemanticExpression, SemanticExtractor, SemanticOccurrenceKind};
+    use super::{
+        DeclarationKind, SemanticExpression, SemanticExtractor, SemanticOccurrenceKind,
+        SemanticTypeCheck,
+    };
 
     #[test]
     fn extracts_parent_types_signatures_scopes_and_documentation() {
@@ -890,5 +918,55 @@ mod tests {
         let offset = source.find("First,").unwrap() + "First,".len();
         assert_eq!(call.argument_at(offset), Some((1, None)));
         assert!(!call.is_complete());
+    }
+
+    #[test]
+    fn extracts_spanned_type_check_sites() {
+        let source = concat!(
+            "ScriptName Example\n",
+            "Int Function Test(Int Input = 1)\n",
+            "  Int Result = Input + 1\n",
+            "  Result += 2\n",
+            "  If Result > 0\n",
+            "    Return Result\n",
+            "  EndIf\n",
+            "  Return 0\n",
+            "EndFunction\n",
+        );
+        let document = SemanticExtractor::new()
+            .unwrap()
+            .extract(Uri::from_str("file:///Example.psc").unwrap(), source);
+        assert_eq!(
+            document
+                .type_checks
+                .iter()
+                .filter(|check| matches!(check, SemanticTypeCheck::Initializer { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            document
+                .type_checks
+                .iter()
+                .filter(|check| matches!(check, SemanticTypeCheck::Assignment { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            document
+                .type_checks
+                .iter()
+                .filter(|check| matches!(check, SemanticTypeCheck::Condition { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            document
+                .type_checks
+                .iter()
+                .filter(|check| matches!(check, SemanticTypeCheck::Return { .. }))
+                .count(),
+            2
+        );
     }
 }

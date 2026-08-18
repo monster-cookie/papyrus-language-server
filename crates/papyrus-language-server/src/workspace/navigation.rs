@@ -303,6 +303,7 @@ impl WorkspaceIndex {
                 &SemanticExpression::Identifier {
                     name: receiver,
                     byte_offset: offset,
+                    range: Range::new(position, position),
                 },
                 &name,
             );

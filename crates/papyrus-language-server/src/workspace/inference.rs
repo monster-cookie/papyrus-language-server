@@ -1,6 +1,11 @@
-use crate::semantic::{Declaration, DeclarationKind, SemanticExpression, TypeRef};
+use crate::semantic::{
+    Declaration, DeclarationKind, SemanticExpression, SemanticLiteralKind, TypeRef,
+};
 
-use super::{IndexedDocument, WorkspaceIndex};
+use super::{
+    IndexedDocument, WorkspaceIndex,
+    type_system::{self, ValueType},
+};
 
 const MAX_EXPRESSION_DEPTH: usize = 64;
 
@@ -142,7 +147,7 @@ impl<T> Resolution<T> {
 enum ExpressionResolution<'a> {
     Declaration(&'a Declaration),
     Script(&'a IndexedDocument, &'a Declaration),
-    Value(TypeRef),
+    Value(ValueType),
 }
 
 pub(super) fn resolve_member_expression<'a>(
@@ -182,10 +187,13 @@ pub(super) fn members_for_expression<'a>(
             .map(|ty| context.members_of_type(current, ty))
             .unwrap_or_default(),
         Resolution::Resolved(ExpressionResolution::Script(_, script)) => context.members_of(script),
-        Resolution::Resolved(ExpressionResolution::Value(ty)) => ty
+        Resolution::Resolved(ExpressionResolution::Value(ValueType::Known(ty))) => ty
             .scalar_name()
             .map(|ty| context.members_of_type(current, ty))
             .unwrap_or_default(),
+        Resolution::Resolved(ExpressionResolution::Value(ValueType::None | ValueType::Void)) => {
+            Vec::new()
+        }
         Resolution::Missing | Resolution::Ambiguous | Resolution::Unsupported => Vec::new(),
     }
 }
@@ -200,7 +208,9 @@ fn resolve_expression<'a>(
         return Resolution::Unsupported;
     }
     match expression {
-        SemanticExpression::Identifier { name, byte_offset } => {
+        SemanticExpression::Identifier {
+            name, byte_offset, ..
+        } => {
             if name.eq_ignore_ascii_case("self") {
                 let Some(script_name) = current.semantic.script_name.as_deref() else {
                     return Resolution::Unsupported;
@@ -209,22 +219,24 @@ fn resolve_expression<'a>(
                     .unique_script(script_name)
                     .map(|(_, script)| context.declaration_name(script))
                     .unwrap_or(script_name);
-                return Resolution::Resolved(ExpressionResolution::Value(TypeRef {
-                    name: effective_name.to_owned(),
-                    array: false,
-                }));
+                return Resolution::Resolved(ExpressionResolution::Value(ValueType::Known(
+                    TypeRef {
+                        name: effective_name.to_owned(),
+                        array: false,
+                    },
+                )));
             }
             if name.eq_ignore_ascii_case("parent") {
                 let Some(parent_name) = current.semantic.parent_script.as_deref() else {
                     return Resolution::Unsupported;
                 };
                 return match context.resolve_script_outcome(parent_name) {
-                    Resolution::Resolved((_, script)) => {
-                        Resolution::Resolved(ExpressionResolution::Value(TypeRef {
+                    Resolution::Resolved((_, script)) => Resolution::Resolved(
+                        ExpressionResolution::Value(ValueType::Known(TypeRef {
                             name: context.declaration_name(script).to_owned(),
                             array: false,
-                        }))
-                    }
+                        })),
+                    ),
                     Resolution::Missing | Resolution::Unsupported => Resolution::Unsupported,
                     Resolution::Ambiguous => Resolution::Ambiguous,
                 };
@@ -252,25 +264,23 @@ fn resolve_expression<'a>(
                 },
             }
         }
-        SemanticExpression::Member {
-            object,
-            member,
-            byte_offset: _,
-        } => match resolve_expression(context, current, object, depth + 1) {
-            Resolution::Resolved(receiver) => {
-                match resolve_member_from_resolution(context, current, receiver, member) {
-                    Resolution::Resolved(declaration) => {
-                        Resolution::Resolved(ExpressionResolution::Declaration(declaration))
+        SemanticExpression::Member { object, member, .. } => {
+            match resolve_expression(context, current, object, depth + 1) {
+                Resolution::Resolved(receiver) => {
+                    match resolve_member_from_resolution(context, current, receiver, member) {
+                        Resolution::Resolved(declaration) => {
+                            Resolution::Resolved(ExpressionResolution::Declaration(declaration))
+                        }
+                        Resolution::Missing => Resolution::Missing,
+                        Resolution::Ambiguous => Resolution::Ambiguous,
+                        Resolution::Unsupported => Resolution::Unsupported,
                     }
-                    Resolution::Missing => Resolution::Missing,
-                    Resolution::Ambiguous => Resolution::Ambiguous,
-                    Resolution::Unsupported => Resolution::Unsupported,
                 }
+                Resolution::Ambiguous => Resolution::Ambiguous,
+                Resolution::Missing | Resolution::Unsupported => Resolution::Unsupported,
             }
-            Resolution::Ambiguous => Resolution::Ambiguous,
-            Resolution::Missing | Resolution::Unsupported => Resolution::Unsupported,
-        },
-        SemanticExpression::Call { function } => {
+        }
+        SemanticExpression::Call { function, .. } => {
             let function = match resolve_expression(context, current, function, depth + 1) {
                 Resolution::Resolved(ExpressionResolution::Declaration(function)) => function,
                 Resolution::Resolved(
@@ -286,13 +296,19 @@ fn resolve_expression<'a>(
             ) {
                 return Resolution::Unsupported;
             }
-            function.ty.clone().map_or(Resolution::Unsupported, |ty| {
-                Resolution::Resolved(ExpressionResolution::Value(ty))
-            })
+            Resolution::Resolved(ExpressionResolution::Value(
+                function
+                    .ty
+                    .clone()
+                    .map_or(ValueType::Void, ValueType::Known),
+            ))
         }
-        SemanticExpression::Subscript { array } => {
-            let mut ty = match expression_type(context, current, array, depth + 1) {
-                Resolution::Resolved(ty) => ty,
+        SemanticExpression::Subscript { array, .. } => {
+            let mut ty = match expression_type_outcome(context, current, array, depth + 1) {
+                Resolution::Resolved(ValueType::Known(ty)) => ty,
+                Resolution::Resolved(ValueType::None | ValueType::Void) => {
+                    return Resolution::Unsupported;
+                }
                 Resolution::Missing => return Resolution::Missing,
                 Resolution::Ambiguous => return Resolution::Ambiguous,
                 Resolution::Unsupported => return Resolution::Unsupported,
@@ -301,33 +317,107 @@ fn resolve_expression<'a>(
                 return Resolution::Unsupported;
             }
             ty.array = false;
-            Resolution::Resolved(ExpressionResolution::Value(ty))
+            Resolution::Resolved(ExpressionResolution::Value(ValueType::Known(ty)))
         }
-        SemanticExpression::Cast { ty } | SemanticExpression::New { ty } => {
-            Resolution::Resolved(ExpressionResolution::Value(ty.clone()))
+        SemanticExpression::Cast { ty, .. } | SemanticExpression::New { ty, .. } => {
+            Resolution::Resolved(ExpressionResolution::Value(ValueType::Known(ty.clone())))
         }
-        SemanticExpression::Parenthesized { value } => {
+        SemanticExpression::TypeTest { .. } => {
+            Resolution::Resolved(ExpressionResolution::Value(type_system::known("Bool")))
+        }
+        SemanticExpression::Parenthesized { value, .. } => {
             resolve_expression(context, current, value, depth + 1)
+        }
+        SemanticExpression::Literal { kind, .. } => {
+            let value = match kind {
+                SemanticLiteralKind::Bool => type_system::known("Bool"),
+                SemanticLiteralKind::Int => type_system::known("Int"),
+                SemanticLiteralKind::Float => type_system::known("Float"),
+                SemanticLiteralKind::String => type_system::known("String"),
+                SemanticLiteralKind::None => ValueType::None,
+            };
+            Resolution::Resolved(ExpressionResolution::Value(value))
+        }
+        SemanticExpression::Unary {
+            operator, argument, ..
+        } => match expression_type_outcome(context, current, argument, depth + 1) {
+            Resolution::Resolved(argument) => type_system::unary_result(*operator, &argument)
+                .map_or(Resolution::Unsupported, |value| {
+                    Resolution::Resolved(ExpressionResolution::Value(value))
+                }),
+            Resolution::Missing => Resolution::Missing,
+            Resolution::Ambiguous => Resolution::Ambiguous,
+            Resolution::Unsupported => Resolution::Unsupported,
+        },
+        SemanticExpression::Binary {
+            left,
+            operator,
+            right,
+            ..
+        } => {
+            let left = match expression_type_outcome(context, current, left, depth + 1) {
+                Resolution::Resolved(left) => left,
+                Resolution::Missing => return Resolution::Missing,
+                Resolution::Ambiguous => return Resolution::Ambiguous,
+                Resolution::Unsupported => return Resolution::Unsupported,
+            };
+            let right = match expression_type_outcome(context, current, right, depth + 1) {
+                Resolution::Resolved(right) => right,
+                Resolution::Missing => return Resolution::Missing,
+                Resolution::Ambiguous => return Resolution::Ambiguous,
+                Resolution::Unsupported => return Resolution::Unsupported,
+            };
+            type_system::binary_result(*operator, &left, &right)
+                .map_or(Resolution::Unsupported, |value| {
+                    Resolution::Resolved(ExpressionResolution::Value(value))
+                })
         }
     }
 }
 
-fn expression_type<'a>(
+pub(super) fn resolve_expression_declaration_outcome<'a>(
+    context: &'a impl ExpressionContext,
+    current: &'a IndexedDocument,
+    expression: &SemanticExpression,
+) -> Resolution<&'a Declaration> {
+    match resolve_expression(context, current, expression, 0) {
+        Resolution::Resolved(ExpressionResolution::Declaration(declaration)) => {
+            Resolution::Resolved(declaration)
+        }
+        Resolution::Resolved(ExpressionResolution::Script(_, _)) => Resolution::Unsupported,
+        Resolution::Resolved(ExpressionResolution::Value(_)) => Resolution::Unsupported,
+        Resolution::Missing => Resolution::Missing,
+        Resolution::Ambiguous => Resolution::Ambiguous,
+        Resolution::Unsupported => Resolution::Unsupported,
+    }
+}
+
+pub(super) fn expression_type_outcome<'a>(
     context: &'a impl ExpressionContext,
     current: &'a IndexedDocument,
     expression: &SemanticExpression,
     depth: usize,
-) -> Resolution<TypeRef> {
+) -> Resolution<ValueType> {
     match resolve_expression(context, current, expression, depth) {
-        Resolution::Resolved(ExpressionResolution::Declaration(declaration)) => declaration
-            .ty
-            .clone()
-            .map_or(Resolution::Unsupported, Resolution::Resolved),
+        Resolution::Resolved(ExpressionResolution::Declaration(declaration)) => {
+            if matches!(
+                declaration.kind,
+                DeclarationKind::Function | DeclarationKind::Event
+            ) {
+                Resolution::Resolved(ValueType::Void)
+            } else {
+                declaration
+                    .ty
+                    .clone()
+                    .map(ValueType::Known)
+                    .map_or(Resolution::Unsupported, Resolution::Resolved)
+            }
+        }
         Resolution::Resolved(ExpressionResolution::Script(_, script)) => {
-            Resolution::Resolved(TypeRef {
+            Resolution::Resolved(ValueType::Known(TypeRef {
                 name: context.declaration_name(script).to_owned(),
                 array: false,
-            })
+            }))
         }
         Resolution::Resolved(ExpressionResolution::Value(ty)) => Resolution::Resolved(ty),
         Resolution::Missing => Resolution::Missing,
@@ -349,12 +439,13 @@ fn resolve_member_from_resolution<'a>(
             };
             resolve_named_type_member(context, current, ty, member)
         }
-        ExpressionResolution::Value(ty) => {
+        ExpressionResolution::Value(ValueType::Known(ty)) => {
             let Some(ty) = ty.scalar_name() else {
                 return Resolution::Unsupported;
             };
             resolve_named_type_member(context, current, ty, member)
         }
+        ExpressionResolution::Value(ValueType::None | ValueType::Void) => Resolution::Unsupported,
         ExpressionResolution::Script(document, script) => unique_named_outcome(
             document
                 .semantic

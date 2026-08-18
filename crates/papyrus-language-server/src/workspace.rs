@@ -11,6 +11,7 @@ mod inference;
 mod navigation;
 mod rename;
 mod scanning;
+mod type_system;
 mod validation;
 
 use lsp_types::{

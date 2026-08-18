@@ -17,9 +17,11 @@
 - Added conservative project-source rename with identifier and collision validation, ambiguity safeguards, external-source protection, and same-namespace Papyrus script file renames through LSP workspace edits.
 - Added conservative expression type inference for chained function returns, casts, parenthesized values, array elements, and `Self` across completion and semantic navigation.
 - Added conservative open-document semantic diagnostics for definite unresolved references and types, missing members, invalid call targets, and named, excess, or missing call arguments, with syntax, ambiguity, incomplete-hierarchy, and overlay safeguards.
+- Added complete assignment, initializer, return, operator, cast, type-test, array, and basic control-condition type diagnostics with Papyrus implicit conversions, ambiguity reporting, and cascade suppression.
 - Persisted syntax-backed identifier occurrences in semantic cache schema v6 without storing source text.
 - Persisted structured expression receivers in semantic cache schema v7 without storing source text.
 - Persisted occurrence roles, parameter-default metadata, call completeness, and argument diagnostic ranges in semantic cache schema v8.
+- Persisted spanned expression trees and statement-level type-check sites in semantic cache schema v9.
 - Split semantic navigation and shared resolution from the workspace indexing and completion module.
 - Moved discovery, bounded scanning, and Starfield source extraction behind initialization onto a cancellable background worker with LSP progress reporting and overlay replay.
 - Hardened semantic and Starfield caches with private platform directories, content verification, resource limits, exclusive staging, and immutable atomic generations.
