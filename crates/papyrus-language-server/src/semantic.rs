@@ -6,6 +6,15 @@ use tree_sitter::{Node, Parser};
 
 use crate::line_index::LineIndex;
 
+mod expression;
+mod type_checks;
+
+pub(crate) use expression::{
+    SemanticBinaryOperator, SemanticExpression, SemanticLiteralKind, SemanticMemberAccess,
+    SemanticUnaryOperator,
+};
+pub(crate) use type_checks::{SemanticAssignmentOperator, SemanticTypeCheck};
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct TypeRef {
     pub(crate) name: String,
@@ -26,6 +35,7 @@ impl TypeRef {
 pub(crate) struct Parameter {
     pub(crate) name: String,
     pub(crate) ty: TypeRef,
+    pub(crate) has_default: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -53,16 +63,27 @@ pub(crate) struct Declaration {
     pub(crate) scope: ByteRange<usize>,
     pub(crate) documentation: Option<String>,
     pub(crate) is_const: bool,
+    pub(crate) is_read_only: bool,
     pub(crate) is_global: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) enum SemanticOccurrenceKind {
+    Reference,
+    Type,
+    Import,
+    Member,
+    NamedArgument,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct SemanticOccurrence {
     pub(crate) name: String,
-    pub(crate) receiver: Option<String>,
+    pub(crate) receiver: Option<SemanticExpression>,
     pub(crate) selection_range: Range,
     pub(crate) byte_offset: usize,
     pub(crate) is_named_argument_label: bool,
+    pub(crate) kind: SemanticOccurrenceKind,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -71,11 +92,14 @@ pub(crate) struct SemanticCallSite {
     argument_range: ByteRange<usize>,
     separators: Vec<usize>,
     arguments: Vec<SemanticCallArgument>,
+    complete: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct SemanticCallArgument {
-    name: Option<String>,
+pub(crate) struct SemanticCallArgument {
+    pub(crate) name: Option<String>,
+    pub(crate) range: Range,
+    pub(crate) name_range: Option<Range>,
     byte_range: ByteRange<usize>,
 }
 
@@ -103,6 +127,14 @@ impl SemanticCallSite {
         self.argument_range
             .end
             .saturating_sub(self.argument_range.start)
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    pub(crate) fn arguments(&self) -> &[SemanticCallArgument] {
+        &self.arguments
     }
 }
 
@@ -144,6 +176,8 @@ pub(crate) struct SemanticDocument {
     pub(crate) declarations: Vec<Declaration>,
     pub(crate) occurrences: Vec<SemanticOccurrence>,
     pub(crate) call_sites: Vec<SemanticCallSite>,
+    pub(crate) member_accesses: Vec<SemanticMemberAccess>,
+    pub(crate) type_checks: Vec<SemanticTypeCheck>,
     pub(crate) symbols: Vec<DocumentSymbol>,
 }
 
@@ -170,6 +204,8 @@ impl SemanticExtractor {
             declarations: Vec::new(),
             occurrences: Vec::new(),
             call_sites: Vec::new(),
+            member_accesses: Vec::new(),
+            type_checks: Vec::new(),
             symbols: Vec::new(),
         };
         let Some(tree) = self.parser.parse(source, None) else {
@@ -213,6 +249,8 @@ impl SemanticExtractor {
             &document.declarations,
             &mut document.call_sites,
         );
+        collect_member_accesses(root, source, &line_index, &mut document.member_accesses);
+        document.type_checks = type_checks::collect_type_checks(root, source, &line_index);
         document.call_sites.sort_by_key(|call| {
             (
                 call.callee_range.start,
@@ -332,9 +370,14 @@ fn call_site_from_children(
                 && argument_start <= child.start_byte()
                 && child.end_byte() <= argument_end
         })
-        .map(|argument| SemanticCallArgument {
-            name: field_text(*argument, "name", source),
-            byte_range: argument.byte_range(),
+        .map(|argument| {
+            let name_node = argument.child_by_field_name("name");
+            SemanticCallArgument {
+                name: name_node.and_then(|name| text(name, source)),
+                range: index.range(source, argument.byte_range()),
+                name_range: name_node.map(|name| index.range(source, name.byte_range())),
+                byte_range: argument.byte_range(),
+            }
         })
         .collect();
     Some(SemanticCallSite {
@@ -342,6 +385,7 @@ fn call_site_from_children(
         argument_range: argument_start..argument_end,
         separators,
         arguments,
+        complete: close.is_some(),
     })
 }
 
@@ -367,14 +411,16 @@ fn collect_occurrences(
 ) {
     if matches!(node.kind(), "identifier" | "qualified_identifier") {
         let selection_range = index.range(source, node.byte_range());
-        if declarations
-            .iter()
-            .any(|declaration| declaration.selection_range == selection_range)
+        if is_group_declaration_name(node)
+            || declarations
+                .iter()
+                .any(|declaration| declaration.selection_range == selection_range)
         {
             return;
         }
-        let is_named_argument_label = is_named_argument_label(node);
-        let Some(receiver) = occurrence_receiver(node, source) else {
+        let kind = occurrence_kind(node);
+        let is_named_argument_label = kind == SemanticOccurrenceKind::NamedArgument;
+        let Some(receiver) = occurrence_receiver(node, source, index) else {
             return;
         };
         if let Some(name) = text(node, source) {
@@ -384,6 +430,7 @@ fn collect_occurrences(
                 selection_range,
                 byte_offset: node.start_byte(),
                 is_named_argument_label,
+                kind,
             });
         }
         return;
@@ -394,7 +441,11 @@ fn collect_occurrences(
     }
 }
 
-fn occurrence_receiver(node: Node<'_>, source: &str) -> Option<Option<String>> {
+fn occurrence_receiver(
+    node: Node<'_>,
+    source: &str,
+    index: &LineIndex,
+) -> Option<Option<SemanticExpression>> {
     let Some(parent) = node.parent() else {
         return Some(None);
     };
@@ -405,10 +456,25 @@ fn occurrence_receiver(node: Node<'_>, source: &str) -> Option<Option<String>> {
         return Some(None);
     }
     let object = parent.child_by_field_name("object")?;
-    matches!(object.kind(), "identifier" | "qualified_identifier")
-        .then(|| text(object, source))
-        .flatten()
-        .map(Some)
+    SemanticExpression::from_node(object, source, index).map(Some)
+}
+
+fn collect_member_accesses(
+    node: Node<'_>,
+    source: &str,
+    index: &LineIndex,
+    output: &mut Vec<SemanticMemberAccess>,
+) {
+    if let Some(access) = SemanticMemberAccess::from_node(node, source, index) {
+        output.push(access);
+    }
+    output.extend(SemanticMemberAccess::recover_from_children(
+        node, source, index,
+    ));
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_member_accesses(child, source, index, output);
+    }
 }
 
 fn is_named_argument_label(node: Node<'_>) -> bool {
@@ -418,6 +484,70 @@ fn is_named_argument_label(node: Node<'_>) -> bool {
                 .child_by_field_name("name")
                 .is_some_and(|name| name.id() == node.id())
     })
+}
+
+fn is_group_declaration_name(node: Node<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "group_declaration"
+            && parent
+                .child_by_field_name("name")
+                .is_some_and(|name| name.id() == node.id())
+    })
+}
+
+fn occurrence_kind(node: Node<'_>) -> SemanticOccurrenceKind {
+    if is_named_argument_label(node) {
+        return SemanticOccurrenceKind::NamedArgument;
+    }
+    if node.parent().is_some_and(|parent| {
+        parent
+            .child_by_field_name("member")
+            .is_some_and(|member| member.id() == node.id())
+    }) {
+        return SemanticOccurrenceKind::Member;
+    }
+    if is_import_occurrence(node) {
+        return SemanticOccurrenceKind::Import;
+    }
+    if is_type_occurrence(node) {
+        return SemanticOccurrenceKind::Type;
+    }
+    SemanticOccurrenceKind::Reference
+}
+
+fn is_import_occurrence(node: Node<'_>) -> bool {
+    let value = node;
+    let Some(parent) = value.parent() else {
+        return false;
+    };
+    parent.kind() == "import_declaration"
+        && parent
+            .child_by_field_name("module")
+            .is_some_and(|module| module.id() == value.id())
+}
+
+fn is_type_occurrence(node: Node<'_>) -> bool {
+    let mut value = node;
+    while let Some(parent) = value.parent() {
+        if parent.kind() == "type" {
+            return true;
+        }
+        if matches!(
+            parent.kind(),
+            "script_declaration" | "import_declaration" | "new_expression"
+        ) && ["parent", "module", "type"].iter().any(|field| {
+            parent
+                .child_by_field_name(field)
+                .is_some_and(|field_node| field_node.id() == value.id())
+        }) {
+            return true;
+        }
+        if parent.kind() != "qualified_identifier" {
+            return false;
+        }
+        value = parent;
+    }
+    false
 }
 
 fn collect(
@@ -516,11 +646,17 @@ fn declaration(
                         ty: child
                             .child_by_field_name("type")
                             .and_then(|ty| type_ref(ty, source))?,
+                        has_default: child.child_by_field_name("default").is_some(),
                     })
                 })
                 .collect()
         })
         .unwrap_or_default();
+    let is_const = has_named_child(node, "const");
+    let is_read_only = is_const
+        || field_text(node, "kind", source)
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("AutoReadOnly"))
+        || (node.kind() == "property_definition" && !has_property_setter(node, source));
     Some(Declaration {
         name,
         kind,
@@ -531,7 +667,8 @@ fn declaration(
         selection_range: index.range(source, name_node.byte_range()),
         scope,
         documentation: preceding_documentation(node, source),
-        is_const: has_named_child(node, "const"),
+        is_const,
+        is_read_only,
         is_global: has_named_child(node, "global"),
     })
 }
@@ -540,6 +677,16 @@ fn has_named_child(node: Node<'_>, kind: &str) -> bool {
     let mut cursor = node.walk();
     node.children(&mut cursor)
         .any(|child| child.kind().eq_ignore_ascii_case(kind))
+}
+
+fn has_property_setter(node: Node<'_>, source: &str) -> bool {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).any(|child| {
+        matches!(
+            child.kind(),
+            "function_definition" | "native_function_declaration"
+        ) && field_text(child, "name", source).is_some_and(|name| name.eq_ignore_ascii_case("Set"))
+    })
 }
 
 fn type_ref(node: Node<'_>, source: &str) -> Option<TypeRef> {
@@ -578,7 +725,10 @@ mod tests {
 
     use lsp_types::Uri;
 
-    use super::{DeclarationKind, SemanticExtractor};
+    use super::{
+        DeclarationKind, SemanticExpression, SemanticExtractor, SemanticOccurrenceKind,
+        SemanticTypeCheck,
+    };
 
     #[test]
     fn extracts_parent_types_signatures_scopes_and_documentation() {
@@ -586,7 +736,7 @@ mod tests {
             "ScriptName Child Extends Parent\n",
             "{Count docs}\n",
             "Int Property Count Auto\n",
-            "Actor Function Resolve(ObjectReference Target)\n",
+            "Actor Function Resolve(ObjectReference Target, String Label = \"\")\n",
             "  Actor LocalActor\n",
             "EndFunction\n",
         );
@@ -608,6 +758,8 @@ mod tests {
             .unwrap();
         assert_eq!(function.kind, DeclarationKind::Function);
         assert_eq!(function.parameters[0].ty.name, "ObjectReference");
+        assert!(!function.parameters[0].has_default);
+        assert!(function.parameters[1].has_default);
         assert!(
             document
                 .declarations
@@ -624,6 +776,18 @@ mod tests {
             "Import Venworks:Core:Logging\n",
             "Int CONST_Value = 1 Const\n",
             "Function LogSystem() Global\nEndFunction\n",
+            "Int Property ReadOnlyValue\n",
+            "  Int Function Get()\n",
+            "    Return 1\n",
+            "  EndFunction\n",
+            "EndProperty\n",
+            "Int Property WritableValue\n",
+            "  Int Function Get()\n",
+            "    Return 1\n",
+            "  EndFunction\n",
+            "  Function Set(Int Value)\n",
+            "  EndFunction\n",
+            "EndProperty\n",
         );
         let document = SemanticExtractor::new()
             .unwrap()
@@ -640,6 +804,18 @@ mod tests {
                 .declarations
                 .iter()
                 .any(|item| item.name == "LogSystem" && item.is_global)
+        );
+        assert!(
+            document
+                .declarations
+                .iter()
+                .any(|item| item.name == "ReadOnlyValue" && item.is_read_only)
+        );
+        assert!(
+            document
+                .declarations
+                .iter()
+                .any(|item| item.name == "WritableValue" && !item.is_read_only)
         );
     }
 
@@ -660,11 +836,20 @@ mod tests {
             .unwrap()
             .extract(Uri::from_str("file:///Example.psc").unwrap(), source);
         assert!(document.occurrences.iter().any(|occurrence| {
-            occurrence.name == "Jump" && occurrence.receiver.as_deref() == Some("Target")
+            occurrence.name == "Jump"
+                && occurrence.kind == SemanticOccurrenceKind::Member
+                && matches!(
+                    occurrence.receiver.as_ref(),
+                    Some(SemanticExpression::Identifier { name, .. }) if name == "Target"
+                )
         }));
         assert!(document.occurrences.iter().any(|occurrence| {
             occurrence.name == "Log"
-                && occurrence.receiver.as_deref() == Some("Venworks:Core:Utility")
+                && matches!(
+                    occurrence.receiver.as_ref(),
+                    Some(SemanticExpression::Identifier { name, .. })
+                        if name == "Venworks:Core:Utility"
+                )
         }));
         assert_eq!(
             document
@@ -678,8 +863,13 @@ mod tests {
             document
                 .occurrences
                 .iter()
-                .any(|occurrence| occurrence.name == "value" && occurrence.is_named_argument_label)
+                .any(|occurrence| occurrence.name == "value"
+                    && occurrence.kind == SemanticOccurrenceKind::NamedArgument
+                    && occurrence.is_named_argument_label)
         );
+        assert!(document.occurrences.iter().any(|occurrence| {
+            occurrence.name == "Actor" && occurrence.kind == SemanticOccurrenceKind::Type
+        }));
         assert!(
             !document
                 .occurrences
@@ -705,6 +895,12 @@ mod tests {
             .find(|declaration| declaration.name == "Enabled")
             .unwrap();
         assert_eq!(property.container, None);
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.name == "Configuration")
+        );
         let group = document
             .symbols
             .iter()
@@ -742,6 +938,7 @@ mod tests {
             .unwrap();
         let last = source.find("Last").unwrap() + 1;
         assert_eq!(outer.argument_at(last), Some((2, None)));
+        assert!(outer.is_complete());
 
         let inner = document
             .call_sites
@@ -771,5 +968,56 @@ mod tests {
         let call = document.call_sites.first().unwrap();
         let offset = source.find("First,").unwrap() + "First,".len();
         assert_eq!(call.argument_at(offset), Some((1, None)));
+        assert!(!call.is_complete());
+    }
+
+    #[test]
+    fn extracts_spanned_type_check_sites() {
+        let source = concat!(
+            "ScriptName Example\n",
+            "Int Function Test(Int Input = 1)\n",
+            "  Int Result = Input + 1\n",
+            "  Result += 2\n",
+            "  If Result > 0\n",
+            "    Return Result\n",
+            "  EndIf\n",
+            "  Return 0\n",
+            "EndFunction\n",
+        );
+        let document = SemanticExtractor::new()
+            .unwrap()
+            .extract(Uri::from_str("file:///Example.psc").unwrap(), source);
+        assert_eq!(
+            document
+                .type_checks
+                .iter()
+                .filter(|check| matches!(check, SemanticTypeCheck::Initializer { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            document
+                .type_checks
+                .iter()
+                .filter(|check| matches!(check, SemanticTypeCheck::Assignment { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            document
+                .type_checks
+                .iter()
+                .filter(|check| matches!(check, SemanticTypeCheck::Condition { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            document
+                .type_checks
+                .iter()
+                .filter(|check| matches!(check, SemanticTypeCheck::Return { .. }))
+                .count(),
+            2
+        );
     }
 }

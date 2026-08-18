@@ -22,7 +22,7 @@
 - Starfield Creation Kit source discovery and local navigable cache.
 - References and signature help.
 - Conservative project-source rename, including same-namespace script file renames.
-- Semantic diagnostics.
+- Semantic diagnostics for references, calls, assignments, returns, operators, arrays, and basic control conditions.
 
 ## 0.4: Optional compiler integration
 

@@ -7,10 +7,13 @@ use lsp_types::{
 
 use crate::{
     line_index::LineIndex,
-    semantic::{Declaration, DeclarationKind, SemanticOccurrence},
+    semantic::{
+        Declaration, DeclarationKind, SemanticExpression, SemanticOccurrence,
+        SemanticOccurrenceKind,
+    },
 };
 
-use super::{IndexedDocument, WorkspaceIndex, is_identifier, receiver_before_dot};
+use super::{IndexedDocument, WorkspaceIndex, inference, is_identifier, receiver_before_dot};
 
 impl WorkspaceIndex {
     pub(crate) fn hover(&self, uri: &Uri, position: Position) -> Option<Hover> {
@@ -185,14 +188,24 @@ impl WorkspaceIndex {
     }
 
     pub(super) fn resolve_at(&self, uri: &Uri, position: Position) -> Option<&Declaration> {
-        let current = self.documents.get(uri)?;
+        self.resolve_at_outcome(uri, position).into_option()
+    }
+
+    pub(super) fn resolve_at_outcome<'a>(
+        &'a self,
+        uri: &Uri,
+        position: Position,
+    ) -> inference::Resolution<&'a Declaration> {
+        let Some(current) = self.documents.get(uri) else {
+            return inference::Resolution::Unsupported;
+        };
         if let Some(declaration) = current
             .semantic
             .declarations
             .iter()
             .find(|declaration| range_contains(declaration.selection_range, position))
         {
-            return Some(declaration);
+            return inference::Resolution::Resolved(declaration);
         }
         if let Some(occurrence) = current
             .semantic
@@ -200,9 +213,12 @@ impl WorkspaceIndex {
             .iter()
             .find(|occurrence| range_contains(occurrence.selection_range, position))
         {
-            return self.resolve_occurrence(current, occurrence);
+            return self.resolve_occurrence_outcome(current, occurrence);
         }
-        self.resolve_text_at(current, position)
+        self.resolve_text_at(current, position).map_or(
+            inference::Resolution::Unsupported,
+            inference::Resolution::Resolved,
+        )
     }
 
     fn resolve_occurrence<'a>(
@@ -210,22 +226,63 @@ impl WorkspaceIndex {
         current: &'a IndexedDocument,
         occurrence: &SemanticOccurrence,
     ) -> Option<&'a Declaration> {
-        if occurrence.is_named_argument_label {
-            return self.resolve_named_argument_parameter(current, occurrence);
+        self.resolve_occurrence_outcome(current, occurrence)
+            .into_option()
+    }
+
+    pub(super) fn resolve_occurrence_outcome<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        occurrence: &SemanticOccurrence,
+    ) -> inference::Resolution<&'a Declaration> {
+        if occurrence.kind == SemanticOccurrenceKind::NamedArgument {
+            return self
+                .resolve_named_argument_parameter(current, occurrence)
+                .map_or(
+                    inference::Resolution::Unsupported,
+                    inference::Resolution::Resolved,
+                );
+        }
+        if occurrence.kind == SemanticOccurrenceKind::Import {
+            return self
+                .unique_script_outcome(&occurrence.name)
+                .map(|(_, declaration)| declaration);
+        }
+        if occurrence.kind == SemanticOccurrenceKind::Type {
+            return self.resolve_type_name_outcome(current, &occurrence.name);
+        }
+        if occurrence.name.eq_ignore_ascii_case("self") {
+            return current.semantic.script_name.as_deref().map_or(
+                inference::Resolution::Unsupported,
+                |name| {
+                    self.unique_script_outcome(name)
+                        .map(|(_, declaration)| declaration)
+                },
+            );
+        }
+        if occurrence.name.eq_ignore_ascii_case("parent") {
+            return current.semantic.parent_script.as_deref().map_or(
+                inference::Resolution::Unsupported,
+                |name| {
+                    self.unique_script_outcome(name)
+                        .map(|(_, declaration)| declaration)
+                },
+            );
         }
         if let Some(receiver) = &occurrence.receiver {
-            return self.resolve_qualified_member(
+            return inference::resolve_member_expression_outcome(
+                self,
                 current,
                 receiver,
                 &occurrence.name,
-                occurrence.byte_offset,
             );
         }
-        self.resolve_visible_name(current, &occurrence.name, occurrence.byte_offset)
-            .or_else(|| {
-                self.unique_script(&occurrence.name)
-                    .map(|(_, declaration)| declaration)
-            })
+        match self.resolve_visible_name_outcome(current, &occurrence.name, occurrence.byte_offset) {
+            inference::Resolution::Missing => self
+                .unique_script_outcome(&occurrence.name)
+                .map(|(_, declaration)| declaration),
+            outcome => outcome,
+        }
     }
 
     fn resolve_text_at<'a>(
@@ -240,7 +297,16 @@ impl WorkspaceIndex {
         let offset = LineIndex::new(text).byte_offset(text, position);
         let name = word_at(text, offset)?;
         if let Some(receiver) = receiver_before_member(text, offset) {
-            return self.resolve_qualified_member(current, &receiver, &name, offset);
+            return inference::resolve_member_expression(
+                self,
+                current,
+                &SemanticExpression::Identifier {
+                    name: receiver,
+                    byte_offset: offset,
+                    range: Range::new(position, position),
+                },
+                &name,
+            );
         }
         self.resolve_visible_name(current, &name, offset)
             .or_else(|| {
@@ -289,37 +355,6 @@ impl WorkspaceIndex {
             })
     }
 
-    fn resolve_qualified_member<'a>(
-        &'a self,
-        current: &'a IndexedDocument,
-        receiver: &str,
-        member: &str,
-        offset: usize,
-    ) -> Option<&'a Declaration> {
-        if let Some(receiver_declaration) = self.resolve_visible_name(current, receiver, offset) {
-            let ty = receiver_declaration.ty.as_ref()?.scalar_name()?;
-            return unique_named(self.members_of_type(current, ty), member);
-        }
-        let (document, script) = self.unique_script(receiver)?;
-        unique_named(
-            document
-                .semantic
-                .declarations
-                .iter()
-                .filter(|declaration| {
-                    declaration.kind == DeclarationKind::Function
-                        && declaration.is_global
-                        && declaration.container.is_none()
-                        && declaration
-                            .owner_script
-                            .as_deref()
-                            .is_some_and(|owner| owner.eq_ignore_ascii_case(&script.name))
-                })
-                .collect(),
-            member,
-        )
-    }
-
     pub(super) fn resolve_visible_name<'a>(
         &'a self,
         current: &'a IndexedDocument,
@@ -357,6 +392,66 @@ impl WorkspaceIndex {
         unique_named(self.members_of(script), name).or_else(|| self.resolve_imported(current, name))
     }
 
+    pub(super) fn resolve_visible_name_outcome<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        name: &str,
+        offset: usize,
+    ) -> inference::Resolution<&'a Declaration> {
+        let scoped = current
+            .semantic
+            .declarations
+            .iter()
+            .filter(|declaration| declaration.name.eq_ignore_ascii_case(name))
+            .filter(|declaration| {
+                declaration.scope.contains(&offset) && declaration.container.is_some()
+            })
+            .collect::<Vec<_>>();
+        match named_outcome(scoped, name) {
+            inference::Resolution::Missing => {}
+            outcome => return outcome,
+        }
+
+        let top_level = current
+            .semantic
+            .declarations
+            .iter()
+            .filter(|declaration| {
+                declaration.name.eq_ignore_ascii_case(name) && declaration.container.is_none()
+            })
+            .collect::<Vec<_>>();
+        match named_outcome(top_level, name) {
+            inference::Resolution::Missing => {}
+            outcome => return outcome,
+        }
+
+        let Some(script_name) = current.semantic.script_name.as_deref() else {
+            return inference::Resolution::Unsupported;
+        };
+        let script = match self.unique_script_outcome(script_name) {
+            inference::Resolution::Resolved((_, script)) => script,
+            inference::Resolution::Missing | inference::Resolution::Unsupported => {
+                return inference::Resolution::Unsupported;
+            }
+            inference::Resolution::Ambiguous => return inference::Resolution::Ambiguous,
+        };
+        match self.members_of_outcome(script) {
+            inference::Resolution::Resolved(members) => match named_outcome(members, name) {
+                inference::Resolution::Missing => {}
+                outcome => return outcome,
+            },
+            inference::Resolution::Missing | inference::Resolution::Unsupported => {
+                return inference::Resolution::Unsupported;
+            }
+            inference::Resolution::Ambiguous => return inference::Resolution::Ambiguous,
+        }
+
+        self.resolve_imported_outcome(current, name, |declaration| {
+            declaration.kind == DeclarationKind::Struct
+                || (declaration.kind == DeclarationKind::Function && declaration.is_global)
+        })
+    }
+
     fn resolve_imported<'a>(
         &'a self,
         current: &'a IndexedDocument,
@@ -377,6 +472,41 @@ impl WorkspaceIndex {
         unique_named(matches, name)
     }
 
+    fn resolve_imported_outcome<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        name: &str,
+        include: impl Fn(&Declaration) -> bool,
+    ) -> inference::Resolution<&'a Declaration> {
+        let mut matches = Vec::new();
+        let mut incomplete = false;
+        for module in &current.semantic.imports {
+            match self.unique_script_outcome(module) {
+                inference::Resolution::Resolved((document, _)) => {
+                    matches.extend(
+                        document
+                            .semantic
+                            .declarations
+                            .iter()
+                            .filter(|declaration| declaration.name.eq_ignore_ascii_case(name))
+                            .filter(|declaration| include(declaration)),
+                    );
+                }
+                inference::Resolution::Missing | inference::Resolution::Unsupported => {
+                    incomplete = true;
+                }
+                inference::Resolution::Ambiguous => return inference::Resolution::Ambiguous,
+            }
+        }
+        match named_outcome(matches, name) {
+            inference::Resolution::Resolved(_) | inference::Resolution::Ambiguous if incomplete => {
+                inference::Resolution::Ambiguous
+            }
+            inference::Resolution::Missing if incomplete => inference::Resolution::Unsupported,
+            outcome => outcome,
+        }
+    }
+
     pub(super) fn unique_scripts(&self) -> Vec<&Declaration> {
         let names = self
             .documents
@@ -392,9 +522,17 @@ impl WorkspaceIndex {
     }
 
     pub(super) fn unique_script(&self, name: &str) -> Option<(&IndexedDocument, &Declaration)> {
-        let mut candidates = self
-            .scripts_by_name
-            .get(&name.to_ascii_lowercase())?
+        self.unique_script_outcome(name).into_option()
+    }
+
+    pub(super) fn unique_script_outcome(
+        &self,
+        name: &str,
+    ) -> inference::Resolution<(&IndexedDocument, &Declaration)> {
+        let Some(uris) = self.scripts_by_name.get(&name.to_ascii_lowercase()) else {
+            return inference::Resolution::Missing;
+        };
+        let mut candidates = uris
             .iter()
             .filter_map(|uri| self.documents.get(uri))
             .filter_map(|entry| {
@@ -409,17 +547,21 @@ impl WorkspaceIndex {
                     .map(|declaration| (entry, declaration))
             })
             .collect::<Vec<_>>();
-        let priority = candidates.iter().map(|(entry, _)| entry.priority).min()?;
+        let Some(priority) = candidates.iter().map(|(entry, _)| entry.priority).min() else {
+            return inference::Resolution::Missing;
+        };
         candidates.retain(|(entry, _)| entry.priority == priority);
-        let first_hash = candidates.first()?.0.content_hash;
+        let Some(first_hash) = candidates.first().map(|candidate| candidate.0.content_hash) else {
+            return inference::Resolution::Missing;
+        };
         if candidates
             .iter()
             .any(|(entry, _)| entry.content_hash != first_hash)
         {
-            return None;
+            return inference::Resolution::Ambiguous;
         }
         candidates.sort_by_key(|(entry, _)| navigation_key(entry));
-        Some(candidates.remove(0))
+        inference::Resolution::Resolved(candidates.remove(0))
     }
 
     pub(super) fn members_of<'a>(&'a self, script: &'a Declaration) -> Vec<&'a Declaration> {
@@ -434,16 +576,7 @@ impl WorkspaceIndex {
                 break;
             };
             for declaration in &document.semantic.declarations {
-                if declaration
-                    .owner_script
-                    .as_deref()
-                    .is_some_and(|owner| owner.eq_ignore_ascii_case(&name))
-                    && declaration.container.is_none()
-                    && !matches!(
-                        declaration.kind,
-                        DeclarationKind::Script | DeclarationKind::Parameter
-                    )
-                    && !declaration.is_global
+                if is_script_member(document, declaration, &name)
                     && !members.iter().any(|existing: &&Declaration| {
                         existing.name.eq_ignore_ascii_case(&declaration.name)
                     })
@@ -454,6 +587,38 @@ impl WorkspaceIndex {
             current = document.semantic.parent_script.clone();
         }
         members
+    }
+
+    fn members_of_outcome<'a>(
+        &'a self,
+        script: &'a Declaration,
+    ) -> inference::Resolution<Vec<&'a Declaration>> {
+        let mut members = Vec::new();
+        let mut visited = HashSet::new();
+        let mut current = Some(script.name.clone());
+        while let Some(name) = current {
+            if !visited.insert(name.to_ascii_lowercase()) {
+                return inference::Resolution::Unsupported;
+            }
+            let document = match self.unique_script_outcome(&name) {
+                inference::Resolution::Resolved((document, _)) => document,
+                inference::Resolution::Ambiguous => return inference::Resolution::Ambiguous,
+                inference::Resolution::Missing | inference::Resolution::Unsupported => {
+                    return inference::Resolution::Unsupported;
+                }
+            };
+            for declaration in &document.semantic.declarations {
+                if is_script_member(document, declaration, &name)
+                    && !members.iter().any(|existing: &&Declaration| {
+                        existing.name.eq_ignore_ascii_case(&declaration.name)
+                    })
+                {
+                    members.push(declaration);
+                }
+            }
+            current = document.semantic.parent_script.clone();
+        }
+        inference::Resolution::Resolved(members)
     }
 
     pub(super) fn members_of_type<'a>(
@@ -487,6 +652,130 @@ impl WorkspaceIndex {
                     .is_some_and(|container| container.eq_ignore_ascii_case(&structure.name))
             })
             .collect()
+    }
+
+    pub(super) fn members_of_type_outcome<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        type_name: &str,
+    ) -> inference::Resolution<Vec<&'a Declaration>> {
+        if is_primitive_type(type_name) {
+            return inference::Resolution::Unsupported;
+        }
+        match self.unique_script_outcome(type_name) {
+            inference::Resolution::Resolved((_, script)) => {
+                return self.members_of_outcome(script);
+            }
+            inference::Resolution::Ambiguous => return inference::Resolution::Ambiguous,
+            inference::Resolution::Missing | inference::Resolution::Unsupported => {}
+        }
+
+        let structure = match self.resolve_structure_outcome(current, type_name) {
+            inference::Resolution::Resolved(structure) => structure,
+            inference::Resolution::Ambiguous => return inference::Resolution::Ambiguous,
+            inference::Resolution::Missing | inference::Resolution::Unsupported => {
+                return inference::Resolution::Unsupported;
+            }
+        };
+        let Some((uri, _)) = self.declaration_location(structure) else {
+            return inference::Resolution::Unsupported;
+        };
+        let Some(document) = self.documents.get(&uri) else {
+            return inference::Resolution::Unsupported;
+        };
+        inference::Resolution::Resolved(
+            document
+                .semantic
+                .declarations
+                .iter()
+                .filter(|declaration| {
+                    declaration
+                        .container
+                        .as_deref()
+                        .is_some_and(|container| container.eq_ignore_ascii_case(&structure.name))
+                })
+                .collect(),
+        )
+    }
+
+    pub(super) fn resolve_type_name_outcome<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        type_name: &str,
+    ) -> inference::Resolution<&'a Declaration> {
+        if is_primitive_type(type_name) {
+            return inference::Resolution::Unsupported;
+        }
+
+        let local = current
+            .semantic
+            .declarations
+            .iter()
+            .filter(|declaration| {
+                declaration.kind == DeclarationKind::Struct
+                    && declaration.container.is_none()
+                    && declaration.name.eq_ignore_ascii_case(type_name)
+            })
+            .collect::<Vec<_>>();
+        match named_outcome(local, type_name) {
+            inference::Resolution::Missing => {}
+            outcome => return outcome,
+        }
+
+        match self.unique_script_outcome(type_name) {
+            inference::Resolution::Resolved((_, script)) => {
+                return inference::Resolution::Resolved(script);
+            }
+            inference::Resolution::Ambiguous => return inference::Resolution::Ambiguous,
+            inference::Resolution::Missing | inference::Resolution::Unsupported => {}
+        }
+
+        self.resolve_structure_outcome(current, type_name)
+    }
+
+    fn resolve_structure_outcome<'a>(
+        &'a self,
+        current: &'a IndexedDocument,
+        type_name: &str,
+    ) -> inference::Resolution<&'a Declaration> {
+        let local = current
+            .semantic
+            .declarations
+            .iter()
+            .filter(|declaration| {
+                declaration.kind == DeclarationKind::Struct
+                    && declaration.container.is_none()
+                    && declaration.name.eq_ignore_ascii_case(type_name)
+            })
+            .collect::<Vec<_>>();
+        match named_outcome(local, type_name) {
+            inference::Resolution::Missing => {}
+            outcome => return outcome,
+        }
+
+        if let Some((script_name, structure_name)) = type_name.rsplit_once(':') {
+            match self.unique_script_outcome(script_name) {
+                inference::Resolution::Resolved((document, _)) => {
+                    let structures = document
+                        .semantic
+                        .declarations
+                        .iter()
+                        .filter(|declaration| {
+                            declaration.kind == DeclarationKind::Struct
+                                && declaration.container.is_none()
+                                && declaration.name.eq_ignore_ascii_case(structure_name)
+                        })
+                        .collect::<Vec<_>>();
+                    return named_outcome(structures, structure_name);
+                }
+                inference::Resolution::Ambiguous => return inference::Resolution::Ambiguous,
+                inference::Resolution::Missing | inference::Resolution::Unsupported => {}
+            }
+        }
+
+        self.resolve_imported_outcome(current, type_name, |declaration| {
+            declaration.kind == DeclarationKind::Struct
+        })
     }
 
     pub(super) fn canonical_declaration<'a>(
@@ -553,12 +842,65 @@ fn navigation_key(document: &IndexedDocument) -> (bool, String) {
     )
 }
 
+fn is_script_member(
+    document: &IndexedDocument,
+    declaration: &Declaration,
+    script_name: &str,
+) -> bool {
+    declaration
+        .owner_script
+        .as_deref()
+        .is_some_and(|owner| owner.eq_ignore_ascii_case(script_name))
+        && !matches!(
+            declaration.kind,
+            DeclarationKind::Script | DeclarationKind::Parameter
+        )
+        && !declaration.is_global
+        && (declaration.container.is_none() || is_state_callable(document, declaration))
+}
+
+fn is_state_callable(document: &IndexedDocument, declaration: &Declaration) -> bool {
+    matches!(
+        declaration.kind,
+        DeclarationKind::Function | DeclarationKind::Event
+    ) && declaration.container.as_deref().is_some_and(|container| {
+        document.semantic.declarations.iter().any(|candidate| {
+            candidate.kind == DeclarationKind::State
+                && candidate.container.is_none()
+                && candidate.name.eq_ignore_ascii_case(container)
+        })
+    })
+}
+
 fn unique_named<'a>(declarations: Vec<&'a Declaration>, name: &str) -> Option<&'a Declaration> {
     let mut matches = declarations
         .into_iter()
         .filter(|declaration| declaration.name.eq_ignore_ascii_case(name));
     let first = matches.next()?;
     matches.next().is_none().then_some(first)
+}
+
+fn named_outcome<'a>(
+    declarations: Vec<&'a Declaration>,
+    name: &str,
+) -> inference::Resolution<&'a Declaration> {
+    let mut matches = declarations
+        .into_iter()
+        .filter(|declaration| declaration.name.eq_ignore_ascii_case(name));
+    let Some(first) = matches.next() else {
+        return inference::Resolution::Missing;
+    };
+    if matches.next().is_some() {
+        inference::Resolution::Ambiguous
+    } else {
+        inference::Resolution::Resolved(first)
+    }
+}
+
+pub(super) fn is_primitive_type(name: &str) -> bool {
+    ["Bool", "Float", "Int", "String", "Var"]
+        .iter()
+        .any(|primitive| primitive.eq_ignore_ascii_case(name))
 }
 
 fn word_at(text: &str, offset: usize) -> Option<String> {

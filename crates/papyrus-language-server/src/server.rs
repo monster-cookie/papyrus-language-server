@@ -278,6 +278,7 @@ impl Server {
             for request in std::mem::take(&mut self.pending_index_requests) {
                 self.handle_request(connection, request)?;
             }
+            self.publish_indexed_semantic_diagnostics(connection)?;
         } else if indexing_finished && let Some(error) = &self.indexing_error {
             for request in std::mem::take(&mut self.pending_index_requests) {
                 connection.sender.send(Message::Response(Response::new_err(
@@ -495,7 +496,7 @@ impl Server {
                 if let Some(document) = self.documents.get(&uri) {
                     self.workspace.overlay(uri.clone(), &document.text);
                 }
-                self.publish(connection, &uri)?;
+                self.publish_open_documents(connection)?;
             }
             "textDocument/didChange" => {
                 let params =
@@ -507,7 +508,7 @@ impl Server {
                     if let Some(document) = self.documents.get(&uri) {
                         self.workspace.overlay(uri.clone(), &document.text);
                     }
-                    self.publish(connection, &uri)?;
+                    self.publish_open_documents(connection)?;
                 }
             }
             "textDocument/didSave" => {
@@ -521,7 +522,7 @@ impl Server {
                 if let Some(document) = self.documents.get(&uri) {
                     self.workspace.overlay(uri.clone(), &document.text);
                 }
-                self.publish(connection, &uri)?;
+                self.publish_open_documents(connection)?;
             }
             "textDocument/didClose" => {
                 let params =
@@ -531,6 +532,7 @@ impl Server {
                 self.documents.close(&uri);
                 self.workspace.close(&uri);
                 publish(connection, uri, Vec::new(), None)?;
+                self.publish_open_documents(connection)?;
             }
             "window/workDoneProgress/cancel" => {
                 let params = notification_params!(
@@ -550,8 +552,42 @@ impl Server {
         let Some(document) = self.documents.get(uri) else {
             return Ok(());
         };
-        let diagnostics = self.analyzer.diagnostics(&document.text);
+        let mut diagnostics = self.analyzer.diagnostics(&document.text);
+        if diagnostics.is_empty() && self.indexing.is_none() && self.indexing_error.is_none() {
+            diagnostics.extend(self.workspace.semantic_diagnostics(uri));
+        }
         publish(connection, uri.clone(), diagnostics, document.version)
+    }
+
+    fn publish_open_documents(&mut self, connection: &Connection) -> ServerResult<()> {
+        let uris = self
+            .documents
+            .iter()
+            .map(|(uri, _)| uri.clone())
+            .collect::<Vec<_>>();
+        for uri in uris {
+            self.publish(connection, &uri)?;
+        }
+        Ok(())
+    }
+
+    fn publish_indexed_semantic_diagnostics(
+        &mut self,
+        connection: &Connection,
+    ) -> ServerResult<()> {
+        let uris = self
+            .documents
+            .iter()
+            .filter(|(_, document)| self.analyzer.diagnostics(&document.text).is_empty())
+            .filter_map(|(uri, document)| {
+                let diagnostics = self.workspace.semantic_diagnostics(uri);
+                (!diagnostics.is_empty()).then(|| (uri.clone(), document.version, diagnostics))
+            })
+            .collect::<Vec<_>>();
+        for (uri, version, diagnostics) in uris {
+            publish(connection, uri, diagnostics, version)?;
+        }
+        Ok(())
     }
 }
 

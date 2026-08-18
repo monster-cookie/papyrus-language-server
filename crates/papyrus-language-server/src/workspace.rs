@@ -7,9 +7,12 @@ use std::{
     time::Instant,
 };
 
+mod inference;
 mod navigation;
 mod rename;
 mod scanning;
+mod type_system;
+mod validation;
 
 use lsp_types::{
     CompletionItem, CompletionItemKind, DocumentSymbol, Documentation, Location, Position,
@@ -62,8 +65,18 @@ impl WorkspaceIndex {
     }
 
     pub(crate) fn empty(config: &WorkspaceConfig) -> Result<Self, String> {
+        let mut config = config.clone();
+        for root in &mut config.source_roots {
+            *root = canonical_workspace_path(root);
+        }
+        for root in &mut config.import_directories {
+            *root = canonical_workspace_path(root);
+        }
+        for root in &mut config.discovered_import_directories {
+            *root = canonical_workspace_path(root);
+        }
         Ok(Self {
-            config: config.clone(),
+            config,
             documents: HashMap::new(),
             semantic_extractor: SemanticExtractor::new()?,
             scripts_by_name: HashMap::new(),
@@ -111,16 +124,17 @@ impl WorkspaceIndex {
         {
             return DiskIndexResult::Ignored;
         }
-        let Some(uri) = path_to_file_uri(path) else {
+        let path = canonical_workspace_path(path);
+        let Some(uri) = path_to_file_uri_lexical(&path) else {
             return DiskIndexResult::Ignored;
         };
-        let Ok(metadata) = fs::metadata(path) else {
+        let Ok(metadata) = fs::metadata(&path) else {
             return DiskIndexResult::Ignored;
         };
         if metadata.len() > max_bytes {
             return DiskIndexResult::TooLarge;
         }
-        let Ok(file) = File::open(path) else {
+        let Ok(file) = File::open(&path) else {
             return DiskIndexResult::Ignored;
         };
         let mut bytes = Vec::with_capacity(metadata.len().min(max_bytes) as usize);
@@ -136,14 +150,14 @@ impl WorkspaceIndex {
         let byte_count = bytes.len() as u64;
         let text = String::from_utf8_lossy(&bytes);
         let content_hash = normalized_content_hash(&text);
-        let priority = self.path_priority(path);
-        if let Some(mut cached) = self.index_cache.get(path, content_hash) {
+        let priority = self.path_priority(&path);
+        if let Some(mut cached) = self.index_cache.get(&path, content_hash) {
             cached.semantic.uri = uri.clone();
             cached.semantic.text = text.into_owned();
             self.documents.insert(
                 uri,
                 IndexedDocument {
-                    path: Some(path.to_owned()),
+                    path: Some(path),
                     priority,
                     symbols: cached.symbols,
                     semantic: cached.semantic,
@@ -152,11 +166,12 @@ impl WorkspaceIndex {
             );
             return DiskIndexResult::Indexed(byte_count);
         }
-        self.index_text(uri, Some(path.to_owned()), priority, &text, true);
+        self.index_text(uri, Some(path), priority, &text, true);
         DiskIndexResult::Indexed(byte_count)
     }
 
     fn path_priority(&self, path: &Path) -> u8 {
+        let path = canonical_workspace_path(path);
         if self
             .config
             .import_directories
@@ -184,14 +199,21 @@ impl WorkspaceIndex {
     }
 
     pub(crate) fn overlay(&mut self, uri: Uri, text: &str) {
+        let is_new_uri = !self.documents.contains_key(&uri);
         let existing = self.documents.get(&uri);
         let path = existing
-            .and_then(|entry| entry.path.clone())
+            .and_then(|document| document.path.clone())
             .or_else(|| self.workspace_path(&uri));
         let priority = existing
-            .map(|entry| entry.priority)
+            .filter(|document| document.path.is_some())
+            .map(|document| document.priority)
             .or_else(|| path.as_deref().map(|path| self.path_priority(path)))
             .unwrap_or(0);
+        if is_new_uri && let Some(path) = path.as_ref() {
+            self.documents.retain(|existing_uri, document| {
+                existing_uri == &uri || document.path.as_ref() != Some(path)
+            });
+        }
         self.index_text(uri, path, priority, text, false);
         self.rebuild_lookups();
     }
@@ -210,7 +232,7 @@ impl WorkspaceIndex {
     }
 
     fn workspace_path(&self, uri: &Uri) -> Option<PathBuf> {
-        let path = crate::config::file_uri_to_path(uri.as_str())?;
+        let path = canonical_workspace_path(&crate::config::file_uri_to_path(uri.as_str())?);
         self.config
             .roots()
             .any(|root| path.starts_with(root))
@@ -313,24 +335,18 @@ impl WorkspaceIndex {
         };
         let offset =
             LineIndex::new(&current.semantic.text).byte_offset(&current.semantic.text, position);
-        let declarations = if let Some(receiver) =
-            receiver_before_dot(&current.semantic.text, offset)
-        {
-            self.resolve_visible_name(current, &receiver, offset)
-                .and_then(|declaration| declaration.ty.as_ref())
-                .and_then(|ty| ty.scalar_name())
-                .map(|ty| self.members_of_type(current, ty))
-                .or_else(|| {
-                    self.unique_script(&receiver)
-                        .map(|(_, script)| self.members_of(script))
-                })
-                .map(|declarations| {
-                    declarations
-                        .into_iter()
-                        .filter(|declaration| is_instance_completion_candidate(declaration))
-                        .collect()
-                })
-                .unwrap_or_default()
+        let receiver = current
+            .semantic
+            .member_accesses
+            .iter()
+            .filter(|access| access.contains_offset(offset))
+            .min_by_key(|access| access.span())
+            .map(|access| &access.receiver);
+        let declarations = if let Some(receiver) = receiver {
+            inference::members_for_expression(self, current, receiver)
+                .into_iter()
+                .filter(|declaration| is_instance_completion_candidate(declaration))
+                .collect()
         } else {
             let mut visible = current
                 .semantic
@@ -358,7 +374,7 @@ impl WorkspaceIndex {
             visible
         };
         let mut items = deduplicated_completion_items(declarations);
-        if receiver_before_dot(&current.semantic.text, offset).is_none() {
+        if receiver.is_none() {
             for primitive in ["Bool", "Float", "Int", "String", "Var"] {
                 if !items
                     .iter()
@@ -492,8 +508,30 @@ fn is_papyrus_file(path: &Path) -> bool {
 }
 
 fn path_to_file_uri(path: &Path) -> Option<Uri> {
-    let absolute = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    let absolute = canonical_workspace_path(path);
     path_to_file_uri_lexical(&absolute)
+}
+
+fn canonical_workspace_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    while let Some(name) = ancestor.file_name() {
+        suffix.push(name.to_owned());
+        let Some(parent) = ancestor.parent() else {
+            break;
+        };
+        ancestor = parent;
+        if let Ok(mut canonical) = fs::canonicalize(ancestor) {
+            for component in suffix.into_iter().rev() {
+                canonical.push(component);
+            }
+            return canonical;
+        }
+    }
+    path.to_owned()
 }
 
 fn path_to_file_uri_lexical(path: &Path) -> Option<Uri> {
@@ -591,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_grouped_properties_and_rejects_array_element_members() {
+    fn resolves_grouped_and_state_members_and_rejects_array_element_members() {
         let root = temp_root("grouped-and-array-members");
         let actor_path = root.join("Actor.psc");
         fs::write(
@@ -603,6 +641,10 @@ mod tests {
                 "EndGroup\n",
                 "Function Jump()\n",
                 "EndFunction\n",
+                "State Active\n",
+                "  Function StateAction()\n",
+                "  EndFunction\n",
+                "EndState\n",
             ),
         )
         .unwrap();
@@ -617,6 +659,7 @@ mod tests {
                 "Function Test()\n",
                 "  Target.\n",
                 "  Target.Grouped\n",
+                "  Target.StateAction()\n",
                 "  Targets.\n",
                 "  Targets.Jump()\n",
                 "EndFunction\n",
@@ -633,6 +676,11 @@ mod tests {
         let target_members = index.completion(&project_uri, Position::new(4, 9));
         assert!(target_members.iter().any(|item| item.label == "Grouped"));
         assert!(target_members.iter().any(|item| item.label == "Jump"));
+        assert!(
+            target_members
+                .iter()
+                .any(|item| item.label == "StateAction")
+        );
         assert_eq!(
             index
                 .definition(&project_uri, Position::new(5, 11))
@@ -640,26 +688,31 @@ mod tests {
                 .uri,
             path_to_file_uri(&actor_path).unwrap()
         );
+        let state_definition = index
+            .definition(&project_uri, Position::new(6, 13))
+            .unwrap();
+        assert_eq!(state_definition.uri, path_to_file_uri(&actor_path).unwrap());
+        assert_eq!(state_definition.range.start.line, 7);
 
         assert!(
             index
-                .completion(&project_uri, Position::new(6, 10))
+                .completion(&project_uri, Position::new(7, 10))
                 .is_empty()
         );
-        assert!(index.hover(&project_uri, Position::new(7, 12)).is_none());
+        assert!(index.hover(&project_uri, Position::new(8, 12)).is_none());
         assert!(
             index
-                .definition(&project_uri, Position::new(7, 12))
+                .definition(&project_uri, Position::new(8, 12))
                 .is_none()
         );
         assert!(
             index
-                .signature_help(&project_uri, Position::new(7, 15))
+                .signature_help(&project_uri, Position::new(8, 15))
                 .is_none()
         );
         assert!(
             index
-                .prepare_rename(&project_uri, Position::new(7, 12), false)
+                .prepare_rename(&project_uri, Position::new(8, 12), false)
                 .is_none()
         );
         assert!(
@@ -973,10 +1026,23 @@ mod tests {
             "ScriptName Actor\nFunction Two()\nEndFunction\n",
         )
         .unwrap();
+        fs::write(
+            root.join("Factory.psc"),
+            "ScriptName Factory\nActor Function GetActor()\nEndFunction\n",
+        )
+        .unwrap();
         let path = root.join("Project.psc");
         fs::write(
             &path,
-            "ScriptName Project\nActor Target\nFunction Test()\n  Target.One()\nEndFunction\n",
+            concat!(
+                "ScriptName Project\n",
+                "Actor Target\n",
+                "Factory Source\n",
+                "Function Test()\n",
+                "  Target.One()\n",
+                "  Source.GetActor().\n",
+                "EndFunction\n",
+            ),
         )
         .unwrap();
         let index = WorkspaceIndex::new(&WorkspaceConfig {
@@ -986,7 +1052,12 @@ mod tests {
         .unwrap();
         assert!(
             index
-                .completion(&path_to_file_uri(&path).unwrap(), Position::new(3, 9))
+                .completion(&path_to_file_uri(&path).unwrap(), Position::new(4, 9))
+                .is_empty()
+        );
+        assert!(
+            index
+                .completion(&path_to_file_uri(&path).unwrap(), Position::new(5, 20))
                 .is_empty()
         );
         let global = index.completion(&path_to_file_uri(&path).unwrap(), Position::new(1, 0));
@@ -995,7 +1066,7 @@ mod tests {
             index
                 .references(
                     &path_to_file_uri(&path).unwrap(),
-                    Position::new(3, 11),
+                    Position::new(4, 11),
                     false
                 )
                 .is_empty()

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{cache_paths::cache_directory, semantic::SemanticDocument};
 
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 10;
 const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const RETAINED_GENERATIONS: usize = 2;
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -343,7 +343,9 @@ mod tests {
 
     use lsp_types::Uri;
 
-    use crate::semantic::SemanticExtractor;
+    use crate::semantic::{
+        SemanticExpression, SemanticExtractor, SemanticOccurrenceKind, SemanticTypeCheck,
+    };
 
     use super::{CachedDocument, IndexCache, fingerprint, generation_paths, path_key};
 
@@ -446,13 +448,22 @@ mod tests {
     }
 
     #[test]
-    fn persists_call_sites_without_persisting_source_text() {
+    fn persists_call_sites_expressions_and_type_checks_without_source_text() {
         let root = temp_root("call-sites");
         let path = root.join("Script.psc");
         let text = concat!(
             "ScriptName Script\n",
+            "Actor TargetActor\n",
             "Function Target(Int Value)\nEndFunction\n",
-            "Function Test()\n  Target(Value = 1)\nEndFunction\n",
+            "Int Function Test()\n",
+            "  Int Result = 1 + 2\n",
+            "  Target(Value = 1)\n",
+            "  TargetActor.GetCompanion().Jump()\n",
+            "  If Result > 0\n",
+            "    Return Result\n",
+            "  EndIf\n",
+            "  Return 0\n",
+            "EndFunction\n",
         );
         fs::write(&path, text).unwrap();
         let mut cache = IndexCache::load_from(Some(root.clone()));
@@ -462,10 +473,41 @@ mod tests {
         let mut loaded = IndexCache::load_from(Some(root.clone()));
         let document = loaded.get(&path, blake3::hash(text.as_bytes())).unwrap();
         assert!(document.semantic.text.is_empty());
-        assert_eq!(document.semantic.call_sites.len(), 1);
+        assert_eq!(document.semantic.call_sites.len(), 3);
         assert!(document.semantic.occurrences.iter().any(|occurrence| {
-            occurrence.name == "Value" && occurrence.is_named_argument_label
+            occurrence.name == "Value"
+                && occurrence.kind == SemanticOccurrenceKind::NamedArgument
+                && occurrence.is_named_argument_label
         }));
+        assert!(document.semantic.occurrences.iter().any(|occurrence| {
+            occurrence.name == "Jump"
+                && matches!(
+                    occurrence.receiver.as_ref(),
+                    Some(SemanticExpression::Call { .. })
+                )
+        }));
+        assert_eq!(document.semantic.member_accesses.len(), 2);
+        assert!(
+            document
+                .semantic
+                .type_checks
+                .iter()
+                .any(|check| matches!(check, SemanticTypeCheck::Initializer { .. }))
+        );
+        assert!(
+            document
+                .semantic
+                .type_checks
+                .iter()
+                .any(|check| matches!(check, SemanticTypeCheck::Condition { .. }))
+        );
+        assert!(
+            document
+                .semantic
+                .type_checks
+                .iter()
+                .any(|check| matches!(check, SemanticTypeCheck::Return { .. }))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
