@@ -1,14 +1,11 @@
 # Changelog
 
-## Unreleased
+## Version 0.3.0 (September 13, 2026)
 
-- Added conservative expression type inference for chained function returns, casts, parenthesized values, array elements, and `Self` across completion and semantic navigation.
-- Added conservative open-document semantic diagnostics for definite unresolved references and types, missing members, invalid call targets, and named, excess, or missing call arguments, with syntax, ambiguity, incomplete-hierarchy, and overlay safeguards.
-- Added complete assignment, initializer, return, operator, cast, type-test, array, and basic control-condition type diagnostics with Papyrus implicit conversions, ambiguity reporting, and cascade suppression.
-- Persisted structured expression receivers in semantic cache schema v7 without storing source text.
-- Persisted occurrence roles, parameter-default metadata, call completeness, and argument diagnostic ranges in semantic cache schema v8.
-- Persisted spanned expression trees and statement-level type-check sites in semantic cache schema v9.
-- Invalidated semantic cache schema v9 with v10 so corrected group-label filtering and getter-only property writability are rebuilt.
+- Improved IntelliSense for chained function calls, casts, parenthesized expressions, array elements, and `Self`, so completion and navigation work in more expressions.
+- Added live error reporting for unknown names and types, missing members, invalid function calls, and incorrect or missing arguments.
+- Added type checking for assignments, initial values, return values, operators, casts, type tests, arrays, and common control-flow conditions.
+- Reduced misleading follow-on errors when code is incomplete or ambiguous, and fixed group labels being mistaken for references and getter-only properties being treated as writable.
 
 ## Version 0.2.0 (August 16th, 2026)
 
