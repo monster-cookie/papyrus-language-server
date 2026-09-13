@@ -21,7 +21,7 @@ tree-sitter-language = "0.1.7"
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [workspace.dependencies.winreg]
-version = "0.55"
+version = "0.56"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
