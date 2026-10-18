@@ -10,7 +10,7 @@
     "grammar:parse": "tree-sitter parse --grammar-path grammar"
   },
   "devDependencies": {
-    "tree-sitter-cli": "0.27.0",
+    "tree-sitter-cli": "0.27.1",
     "web-tree-sitter": "0.27.0"
   },
   "allowScripts": {
